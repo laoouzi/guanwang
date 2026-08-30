@@ -26,6 +26,10 @@ class LLMGateway:
     def list_providers(self) -> list[str]:
         return list(self._providers)
 
+    def get_provider(self, name: str):
+        """按名取 provider（未注册返回 None）。"""
+        return self._providers.get(name)
+
     def chat(self, provider: str, messages: list[Message], tools: list[dict] | None = None) -> LLMResponse:
         if provider not in self._providers:
             raise KeyError(f"未注册的 provider: {provider}")

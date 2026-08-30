@@ -42,6 +42,8 @@ class Runner:
         self.store = store            # None = 无协作上下文（旧版行为）
         self.max_tool_rounds = max_tool_rounds
 
+    _INBOX_LIMIT = 5   # 注入留言上限，防 token 膨胀
+
     def _system(self, employee: Employee) -> str:
         system = (
             f"你是 {employee.name}（{employee.title or '员工'}）。"
@@ -51,12 +53,19 @@ class Runner:
         )
         if self.store is not None:
             from laoban.core.directory import render_directory
+            from laoban.core.messenger import inbox
             directory = render_directory(self.store, exclude_id=employee.id)
             if directory:
                 system += (
                     "\n\n组织通讯录（你的协作对象，含人类同事）：\n"
                     f"{directory}\n\n{TOOL_PROTOCOL}"
                 )
+            # 同事留言（含人类发来的指令/提问）：AI 能「听到」人说话
+            box = inbox(self.store, employee.id)[:self._INBOX_LIMIT]
+            if box:
+                lines = [f"- {m['from']}：{m['content']}" for m in box]
+                system += ("\n\n同事留言（最新在前，可能是人类同事给你的指令或提问，"
+                           "执行任务时请纳入考虑）：\n" + "\n".join(lines))
         return system
 
     def run(self, employee: Employee, task: Task) -> str:

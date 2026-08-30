@@ -14,6 +14,7 @@ from ..core.workstation import queue_of
 
 class _Handler(BaseHTTPRequestHandler):
     store: JsonStore = None  # 由工厂注入
+    gateway = None           # 可选：聊天端点需要 LLM 网关
 
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
@@ -25,6 +26,46 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _error(self, status: int, message: str):
         return self._json({"error": message}, status)
+
+    def _read_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        if not length:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            return {}
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        if u.path == "/api/chat":
+            if self.gateway is None:
+                return self._error(503, "聊天需要 LLM 网关（未配置）")
+            body = self._read_body()
+            from_id = body.get("from", "")
+            to_id = body.get("to", "")
+            content = body.get("content", "")
+            if not (from_id and to_id and content):
+                return self._error(400, "缺少 from / to / content")
+            from ..runner.chat import chat_reply
+            from ..core.permission import PermissionDenied
+            from ..llm.openai_compatible import ProviderError
+            try:
+                result = chat_reply(self.store, self.gateway,
+                                    from_id, to_id, content)
+            except KeyError as e:
+                return self._error(404, str(e))
+            except PermissionDenied as e:
+                return self._error(403, str(e))
+            except ValueError as e:
+                return self._error(409, str(e))
+            except ProviderError as e:
+                return self._error(502, f"LLM 调用失败：{e}")
+            return self._json({
+                "question": result["question"],
+                "reply": result["reply"],
+            })
+        return self._error(404, f"未知路径：{u.path}")
 
     def _who_required(self, u) -> str | None:
         who = parse_qs(u.query).get("who", [""])[0]
@@ -102,8 +143,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class DashboardServer:
-    def __init__(self, store: JsonStore, port: int = 7891):
-        handler = type("H", (_Handler,), {"store": store})
+    def __init__(self, store: JsonStore, port: int = 7891, gateway=None):
+        handler = type("H", (_Handler,), {"store": store, "gateway": gateway})
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.port = self.httpd.server_address[1]
 

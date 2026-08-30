@@ -117,6 +117,9 @@ def _build_parser() -> argparse.ArgumentParser:
     dash = sub.add_parser("dashboard", help="启动 Web 看板（默认 127.0.0.1:7891）")
     dash.add_argument("--root", default=".laoban")
     dash.add_argument("--port", type=int, default=7891)
+    dash.add_argument("--provider", default="",
+                      help="聊天 LLM provider（deepseek/qwen/openai/kimi/ollama）；"
+                           "默认自动发现 LAOBAN_* 环境变量，无则聊天不可用")
 
     demo = sub.add_parser("demo", help="演示模式（MockLLM，无需 API Key）")
 
@@ -334,8 +337,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "dashboard":
         from .dashboard.server import DashboardServer
+        from .llm.gateway import LLMGateway
+        from .llm.openai_compatible import register_from_env
         st = JsonStore(args.root)
-        server = DashboardServer(st, port=args.port)
+        gw = LLMGateway()
+        real = register_from_env(gw)
+        provider = args.provider or (real[0] if real else "")
+        if provider and provider not in gw.list_providers():
+            print(f"⚠️ provider [{provider}] 未注册（可用：{', '.join(gw.list_providers()) or '无'}），聊天不可用")
+            provider = ""
+        if provider:
+            # 员工 model_config.provider 可能是 org.json 里的演示名（dev/pm/...），
+            # 统一把真实 LLM 挂到这些名下，聊天按员工自己的配置路由
+            real_llm = gw.get_provider(provider)
+            for e in st.list_employees():
+                if e.kind != "ai":
+                    continue
+                pid = e.model_config.get("provider", "mock")
+                if pid not in gw.list_providers():
+                    gw.register_provider(pid, real_llm)
+            print(f"聊天已启用：provider = {provider}（AI 员工统一路由，支持人↔AI 对话）")
+        else:
+            gw = None
+            print("未检测到 LLM Key（LAOBAN_MOONSHOT_API_KEY 等），聊天不可用，看板其余功能正常")
+        server = DashboardServer(st, port=args.port, gateway=gw)
         print(f"看板已启动：http://127.0.0.1:{server.port}/ （Ctrl+C 退出）")
         try:
             server.serve_forever()
