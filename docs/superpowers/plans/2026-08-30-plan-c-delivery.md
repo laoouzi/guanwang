@@ -249,8 +249,7 @@ class TestCliFull(unittest.TestCase):
         main(["init", "--root", self.root])
         rc = main(["hire", "--root", self.root, "--name", "阿码", "--title", "开发工程师"])
         self.assertEqual(rc, 0)
-        self.assertTrue((Path(self.root) / "employees" / "dev").exists()
-                        or any((Path(self.root) / "employees").iterdir()))
+        self.assertTrue((Path(self.root) / "employees" / "emp-阿码.json").exists())
 
     def test_task_submit_and_status(self):
         main(["init", "--root", self.root])
