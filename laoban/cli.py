@@ -80,6 +80,18 @@ def _build_parser() -> argparse.ArgumentParser:
     tst.add_argument("--root", default=".laoban")
     tst.add_argument("--id", default="")
 
+    auth_p = sub.add_parser("auth", help="员工口令鉴权（看板登录）")
+    auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
+    ap = auth_sub.add_parser("passwd", help="给员工设口令（设过任何一个即启用看板登录）")
+    ap.add_argument("--root", default=".laoban")
+    ap.add_argument("--who", required=True, help="员工 id")
+    ap.add_argument("--password", default="", help="口令（留空则交互输入，不回显）")
+    ar = auth_sub.add_parser("remove", help="清除员工口令")
+    ar.add_argument("--root", default=".laoban")
+    ar.add_argument("--who", required=True, help="员工 id")
+    al = auth_sub.add_parser("list", help="查看已设口令的员工")
+    al.add_argument("--root", default=".laoban")
+
     im_p = sub.add_parser("im", help="IM 渠道接入（飞书等 ↔ 消息总线）")
     im_sub = im_p.add_subparsers(dest="im_command", required=True)
     ib = im_sub.add_parser("bind", help="绑定 IM 账号 ↔ 员工 id")
@@ -305,6 +317,50 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{t.id}\t{t.state}\t{t.title}")
             return 0
 
+    if cmd == "auth":
+        from .core.auth import AuthStore
+        st = JsonStore(args.root)
+        au = AuthStore(st.root)
+        if args.auth_command == "passwd":
+            emp = st.load_employee(args.who)
+            if not emp:
+                print(f"⚠️ 员工不存在：{args.who}")
+                return 1
+            pw = args.password
+            if not pw:
+                import getpass
+                pw = getpass.getpass(f"为 {emp.name}（{emp.id}）设置口令：")
+                confirm = getpass.getpass("再输一次确认：")
+                if pw != confirm:
+                    print("⚠️ 两次输入不一致，未保存")
+                    return 1
+            if not pw:
+                print("⚠️ 口令不能为空")
+                return 1
+            au.set_password(args.who, pw)
+            mode = "看板已启用登录" if au.enabled() else ""
+            print(f"口令已设置：{emp.name}（{emp.id}）{mode}")
+            return 0
+        if args.auth_command == "remove":
+            ok = au.remove(args.who)
+            if ok:
+                note = "（全部口令已清除，看板回到免鉴权模式）" if not au.enabled() else ""
+                print(f"口令已清除：{args.who} {note}")
+            else:
+                print(f"⚠️ 该员工未设口令：{args.who}")
+            return 0 if ok else 1
+        if args.auth_command == "list":
+            accounts = au.list_accounts()
+            if not accounts:
+                print("未设任何口令（看板免鉴权模式；laoban auth passwd 启用登录）")
+            else:
+                print(f"已设口令的员工（{len(accounts)} 名，看板需登录）：")
+                for eid in accounts:
+                    emp = st.load_employee(eid)
+                    label = emp.name if emp else "（档案缺失）"
+                    print(f"  {eid}\t{label}")
+            return 0
+
     if cmd == "im":
         from .im.binding import Bindings
         st = JsonStore(args.root)
@@ -377,6 +433,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if cmd == "dashboard":
+        from .core.auth import AuthStore
         from .dashboard.server import DashboardServer
         from .llm.gateway import LLMGateway
         from .llm.openai_compatible import register_from_env
@@ -409,12 +466,15 @@ def main(argv: list[str] | None = None) -> int:
         if fs is not None:
             feishu_hook = FeishuWebhook(
                 st, gw, fs, Bindings(st.root),
-                default_to=os.environ.get("LAOBAN_IM_DEFAULT_TO", "").strip())
+                default_to=os.environ.get("LAOBAN_IM_DEFAULT_TO", "").strip(),
+                encrypt_key=os.environ.get(
+                    "LAOBAN_FEISHU_ENCRYPT_KEY", "").strip())
             print(f"飞书接入已启用：事件回调 URL = http://<本机地址>:{args.port}/api/im/webhook/feishu"
                   "（需公网可达或内网穿透）")
         else:
             print("未配置飞书（LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET），IM 渠道未启用")
-        server = DashboardServer(st, port=args.port, gateway=gw, feishu=feishu_hook)
+        server = DashboardServer(st, port=args.port, gateway=gw,
+                                 feishu=feishu_hook, auth=AuthStore(st.root))
         print(f"看板已启动：http://127.0.0.1:{server.port}/ （Ctrl+C 退出）")
         try:
             server.serve_forever()

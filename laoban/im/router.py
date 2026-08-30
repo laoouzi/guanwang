@@ -44,55 +44,68 @@ def _safe_push(push, platform: str, im_user: str, text: str) -> bool:
         return False
 
 
+def _safe_reply(reply_fn, platform: str, text: str) -> bool:
+    try:
+        reply_fn(text)
+        return True
+    except Exception as e:
+        print(f"[IM:{platform}] 回信推送失败：{e!r}")
+        return False
+
+
 def route_inbound(store: JsonStore, gateway: LLMGateway | None,
                   bindings: Bindings, platform: str, im_user: str, text: str,
-                  push, default_to: str = "") -> dict:
+                  push, default_to: str = "", reply=None) -> dict:
     """处理一条入站 IM 消息，返回审计摘要。
 
     - 发送者未绑定 → 推送绑定指引；
     - 收件人是 AI：chat_reply（走消息总线 + Runner 上下文）→ 回信推回发送者 IM；
     - 收件人是人类：仅投递消息总线；若对方也绑定本渠道，同步推送其 IM；
     - 权限/不存在/无网关等错误以 ⚠️ 文案推回发送者，不炸渠道线程。
+
+    reply：回给发送者的通道（默认 = DM 发送者）。群聊场景传入「发群」回调后，
+    回信 / 错误提示 / 投递回执都会进群，而人→人中转仍走对方 DM（不打扰群）。
     """
+    reply_fn = reply or (lambda t: push(im_user, t))
     sender = bindings.lookup(platform, im_user)
     if not sender:
-        _safe_push(push, platform, im_user,
-                   f"⚠️ 你的 IM 账号未绑定员工 id。管理员执行："
-                   f"laoban im bind --platform {platform} --im-user {im_user} "
-                   f"--employee <员工id>")
+        _safe_reply(reply_fn, platform,
+                    f"⚠️ 你的 IM 账号未绑定员工 id。管理员执行："
+                    f"laoban im bind --platform {platform} --im-user {im_user} "
+                    f"--employee <员工id>")
         return {"summary": f"未绑定：{platform}:{im_user}"}
 
     target, content = parse_target(text, store)
     if target is None:
         target = default_to or ""
     if not target:
-        _safe_push(push, platform, im_user,
-                   "请指定收件同事，格式「同事id: 内容」，如「dev: 你好」；"
-                   "可用 id 运行 laoban employees 查看")
+        _safe_reply(reply_fn, platform,
+                    "请指定收件同事，格式「同事id: 内容」，如「dev: 你好」；"
+                    "可用 id 运行 laoban employees 查看")
         return {"summary": f"{sender} 未指定收件人"}
 
     if gateway is None:
         t = store.load_employee(target)
         if t and t.kind == "ai":
-            _safe_push(push, platform, im_user,
-                       "⚠️ 聊天需要 LLM 网关（未配置 LAOBAN_*_API_KEY）")
+            _safe_reply(reply_fn, platform,
+                        "⚠️ 聊天需要 LLM 网关（未配置 LAOBAN_*_API_KEY）")
             return {"summary": f"{sender} → {target}：无网关，未回信"}
 
     try:
         result = chat_reply(store, gateway, sender, target, content)
     except KeyError as e:
-        _safe_push(push, platform, im_user, f"⚠️ {e}")
+        _safe_reply(reply_fn, platform, f"⚠️ {e}")
         return {"summary": f"{sender} → {target}：不存在"}
     except ValueError as e:
-        _safe_push(push, platform, im_user, f"⚠️ {e}")
+        _safe_reply(reply_fn, platform, f"⚠️ {e}")
         return {"summary": f"{sender} → {target}：状态异常"}
     except Exception as e:  # PermissionDenied / ProviderError 等
-        _safe_push(push, platform, im_user, f"⚠️ {e}")
+        _safe_reply(reply_fn, platform, f"⚠️ {e}")
         return {"summary": f"{sender} → {target}：{type(e).__name__}"}
 
-    reply = result["reply"]
-    if reply is not None:
-        ok = _safe_push(push, platform, im_user, reply)
+    reply_text = result["reply"]
+    if reply_text is not None:
+        ok = _safe_reply(reply_fn, platform, reply_text)
         return {"summary": f"{sender} → {target}：已回信"
                 + ("" if ok else "（回信推送失败，已落消息总线）")}
 
@@ -103,5 +116,5 @@ def route_inbound(store: JsonStore, gateway: LLMGateway | None,
         note = "已投递并推送到对方 IM" if relay_ok else "已投递（对方 IM 推送失败）"
     else:
         note = f"已投递到 {target} 的收件箱（对方未绑定 IM，通过看板/CLI 查看）"
-    _safe_push(push, platform, im_user, f"✅ {note}")
+    _safe_reply(reply_fn, platform, f"✅ {note}")
     return {"summary": f"{sender} → {target}：{note}"}

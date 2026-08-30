@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -11,11 +12,15 @@ from ..core.human_inbox import HumanInbox
 from ..core.messenger import inbox as msg_inbox, sent as msg_sent
 from ..core.workstation import queue_of
 
+SESSION_COOKIE = "laoban_session"
+
 
 class _Handler(BaseHTTPRequestHandler):
     store: JsonStore = None  # 由工厂注入
     gateway = None           # 可选：聊天端点需要 LLM 网关
     feishu = None            # 可选：飞书事件回调（IM 渠道入口）
+    auth = None              # 可选：口令库（设过任何口令即启用登录）
+    sessions: dict = None    # 会话表 token → emp_id（DashboardServer 注入）
 
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
@@ -37,8 +42,75 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    # ---- 会话（登录后 Cookie 携带 token）----
+    def _session_emp(self) -> str | None:
+        """当前会话对应的员工 id；未登录返回 None。"""
+        if not self.sessions:
+            return None
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == SESSION_COOKIE and v:
+                return self.sessions.get(v)
+        return None
+
+    def _require_own_identity(self, from_id: str):
+        """鉴权启用后：必须登录，且只能以自己的员工身份发送。
+
+        返回 None = 校验通过；否则返回 (status, error)。
+        """
+        if not self.auth or not self.auth.enabled():
+            return None   # 免鉴权模式（未设任何口令）
+        me = self._session_emp()
+        if not me:
+            return (401, "请先登录（POST /api/login）")
+        if from_id != me:
+            return (403, f"只能以自己的身份发送（当前登录：{me}）")
+        return None
+
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path == "/api/login":
+            body = self._read_body()
+            emp_id = body.get("id", "")
+            password = body.get("password", "")
+            if not (emp_id and password):
+                return self._error(400, "缺少 id / password")
+            if not (self.auth and self.auth.enabled()):
+                return self._error(409, "未设任何口令（免鉴权模式，无需登录）")
+            emp = self.store.load_employee(emp_id)
+            if not emp:
+                return self._error(404, f"员工不存在：{emp_id}")
+            if not self.auth.verify(emp_id, password):
+                return self._error(401, "员工 id 或口令错误")
+            token = uuid.uuid4().hex
+            self.sessions[token] = emp_id
+            body_ = json.dumps({"id": emp.id, "name": emp.name,
+                                "kind": emp.kind}, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Set-Cookie",
+                             f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; "
+                             "SameSite=Strict")
+            self.send_header("Content-Length", str(len(body_)))
+            self.end_headers()
+            self.wfile.write(body_)
+            return
+        if u.path == "/api/logout":
+            raw = self.headers.get("Cookie", "")
+            for part in raw.split(";"):
+                k, _, v = part.strip().partition("=")
+                if k == SESSION_COOKIE and v:
+                    self.sessions.pop(v, None)
+            body_ = json.dumps({"ok": True}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Set-Cookie",
+                             f"{SESSION_COOKIE}=; Path=/; Max-Age=0")
+            self.send_header("Content-Length", str(len(body_)))
+            self.end_headers()
+            self.wfile.write(body_)
+            return
         if u.path == "/api/chat":
             if self.gateway is None:
                 return self._error(503, "聊天需要 LLM 网关（未配置）")
@@ -48,6 +120,9 @@ class _Handler(BaseHTTPRequestHandler):
             content = body.get("content", "")
             if not (from_id and to_id and content):
                 return self._error(400, "缺少 from / to / content")
+            denied = self._require_own_identity(from_id)
+            if denied:
+                return self._error(denied[0], denied[1])
             from ..runner.chat import chat_reply
             from ..core.permission import PermissionDenied
             from ..llm.openai_compatible import ProviderError
@@ -82,6 +157,18 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
+        if u.path == "/api/me":
+            if self.auth and self.auth.enabled():
+                me = self._session_emp()
+                if not me:
+                    return self._error(401, "未登录")
+                emp = self.store.load_employee(me)
+                if not emp:
+                    return self._error(401, "会话员工已不存在")
+                return self._json({"id": emp.id, "name": emp.name,
+                                   "kind": emp.kind, "title": emp.title})
+            return self._json({"id": "", "name": "免鉴权模式",
+                               "kind": "", "title": "未设口令，无需登录"})
         if u.path == "/api/tasks":
             return self._json([t.to_dict() for t in self.store.list_tasks()])
         if u.path == "/api/employees":
@@ -150,9 +237,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 class DashboardServer:
     def __init__(self, store: JsonStore, port: int = 7891, gateway=None,
-                 feishu=None):
-        handler = type("H", (_Handler,), {"store": store, "gateway": gateway,
-                                          "feishu": feishu})
+                 feishu=None, auth=None):
+        handler = type("H", (_Handler,), {
+            "store": store, "gateway": gateway, "feishu": feishu,
+            "auth": auth, "sessions": {},
+        })
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.port = self.httpd.server_address[1]
 

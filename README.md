@@ -25,6 +25,7 @@ laoban todo add --assignee emp-陈工 --title "配合 AI 核查数据" --due 202
 laoban today --who emp-陈工          # 人类员工当日任务清单
 laoban todo add --assignee emp-小李 --title "复核异常值" --source self --from emp-陈工
 laoban todo results --who emp-陈工   # 人→人闭环：查看发起任务回传的结果
+laoban auth passwd --who emp-chen        # 给员工设口令（设过即启用看板登录）
 laoban dashboard          # Web 看板（127.0.0.1:7891）
 ```
 
@@ -173,6 +174,20 @@ gw.register_provider("my-llm", OpenAICompatibleProvider(
 `permissions.collaboration` **为空 = 组织内默认可联系任何人**；非空 = 白名单模式（只能联系白名单内员工）。
 非在职（suspended/terminated）员工不可发送消息。
 
+### 员工鉴权（看板登录）
+
+看板默认免鉴权（本地单人使用）。给任一员工设过口令后，看板自动启用登录：
+
+```bash
+laoban auth passwd --who emp-chen          # 交互输入口令（或 --password 指定）
+laoban auth list                           # 查看已设口令的员工
+laoban auth remove --who emp-chen          # 清除口令（全部清除后回到免鉴权模式）
+```
+
+- 口令以 **PBKDF2-HMAC-SHA256（12 万轮 + 随机盐）** 落盘 `.laoban/auth.json`，不存明文；
+- 登录后发 HttpOnly 会话 Cookie；聊天强制以本人身份发送（冒充他人 → 403）；
+- 登录后看板锁定身份输入框，AI 同事下拉可选（含在职状态），支持载入历史消息。
+
 ### 人↔AI 聊天与 IM 渠道接入
 
 消息总线是唯一事实源，渠道只是入口/出口：
@@ -183,7 +198,10 @@ gw.register_provider("my-llm", OpenAICompatibleProvider(
 # 2. 飞书机器人接入
 export LAOBAN_FEISHU_APP_ID=cli_xxx
 export LAOBAN_FEISHU_APP_SECRET=xxx
-# 可选：LAOBAN_FEISHU_VERIFICATION_TOKEN（事件 token 校验）/ LAOBAN_IM_DEFAULT_TO（默认收件人）
+# 可选：LAOBAN_FEISHU_VERIFICATION_TOKEN（事件 token 校验）
+#       LAOBAN_FEISHU_ENCRYPT_KEY（事件加密，需 pip install pycryptodome 或 cryptography）
+#       LAOBAN_FEISHU_BOT_OPEN_ID（群聊 @识别；不配则任何 @ 都视为 @机器人）
+#       LAOBAN_IM_DEFAULT_TO（默认收件人）
 laoban im bind --platform feishu --im-user ou_xxx --employee emp-chen   # IM 账号 ↔ 员工
 laoban dashboard   # 事件回调 URL 填 http://<本机>:7891/api/im/webhook/feishu（需公网/内网穿透）
 ```
@@ -191,7 +209,13 @@ laoban dashboard   # 事件回调 URL 填 http://<本机>:7891/api/im/webhook/fe
 员工在飞书里给机器人发 `dev: 数据放哪了？`（格式「同事id: 内容」）→ 消息落总线 →
 AI 回信推回飞书；收件人是人类同事时只投递，若对方也绑定了则同步推送其 IM（人↔人经总线中转）。
 事件 ACK 后台线程回信（飞书 3 秒 ACK 要求），event_id 去重防重试风暴。
-当前支持飞书 2.0 明文事件（DM 文本）；加密事件与群聊 @ 提及暂未支持。
+
+- **私聊（DM）**：文本消息直接处理，回信 DM 提问者；
+- **群聊**：只有 @机器人 的消息才处理（不吵群），@提及 token 剥离后照常解析
+  「同事id: 内容」，回信 / 错误提示 / 投递回执推回群里（chat_id），
+  人→人中转仍走对方 DM；
+- **加密事件**：配置 `LAOBAN_FEISHU_ENCRYPT_KEY` 后支持
+  AES-256-CBC（key=SHA256(encrypt_key)）密文体，未配 key 收到密文返回 400。
 
 ### 验收套件（D2）
 
@@ -214,6 +238,7 @@ laoban acceptance run --root /tmp/laoban-acc
 ├── employees/<id>.json       # 员工档案
 ├── messages/<id>.json        # 点对点消息（MSG-*）
 ├── im_bindings.json          # IM 账号 ↔ 员工 id 绑定表（laoban im bind）
+├── auth.json                 # 员工口令库（PBKDF2 盐+哈希，laoban auth passwd）
 ├── human_tasks/<id>.json     # 人类待办（AI 派发的配合任务 / 自建 / 老板指派）
 ├── headcount_requests/       # 编制申请（双轨招聘）
 ├── approvals/<id>.json       # 审批日志（高危必记）

@@ -38,6 +38,14 @@
 <body>
   <h1>laoban 管理看板</h1>
 
+  <h2>登录</h2>
+  <p id="loginBar">
+    <input id="loginId" placeholder="员工 id，如 emp-chen" />
+    <input id="loginPw" type="password" placeholder="口令" />
+    <button onclick="doLogin()">登录</button>
+    <span id="meInfo" class="msg-meta"></span>
+  </p>
+
   <h2>组织架构</h2>
   <div id="org"></div>
 
@@ -50,7 +58,9 @@
   <h2>与 AI 员工对话</h2>
   <p>
     <input id="chatFrom" placeholder="我的员工 id，如 emp-chen" />
-    <input id="chatTo" placeholder="AI 员工 id，如 dev" />
+    <input id="chatTo" list="aiEmployees" placeholder="同事 id，如 dev（可下拉选择）" />
+    <datalist id="aiEmployees"></datalist>
+    <button onclick="loadChatHistory()">载入历史消息</button>
   </p>
   <p>
     <textarea id="chatContent" rows="2" style="width:60%" placeholder="输入消息，Enter 发送（Shift+Enter 换行）"></textarea>
@@ -104,7 +114,72 @@
         `<tr><td>${esc(e.id)}</td><td>${kindBadge(e.kind)}</td>` +
         `<td>${esc(e.name)}</td><td>${esc(e.title)}</td><td>${esc(e.department)}</td>` +
         `<td>${statusBadge(e.status)}</td></tr>`).join('');
+      // 聊天目标下拉：AI 员工（含状态，便于挑在岗的）
+      document.getElementById('aiEmployees').innerHTML = es.filter(e =>
+        e.kind === 'ai').map(e =>
+        `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.title || 'AI 员工')}（${esc(STATUS_LABEL[e.status] || e.status)}）</option>`).join('');
       await loadOrg();
+      await loadMe();
+    }
+
+    async function loadMe() {
+      const resp = await fetch('/api/me');
+      if (!resp.ok) { setMe(null); return; }
+      const me = await resp.json();
+      setMe(me.id ? me : null);
+    }
+
+    function setMe(me) {
+      const info = document.getElementById('meInfo');
+      const from = document.getElementById('chatFrom');
+      if (me) {
+        info.textContent = `已登录：${me.name}（${me.id}${me.title ? ' · ' + me.title : ''}）`;
+        info.insertAdjacentHTML('beforeend',
+          ' <a href="#" onclick="doLogout();return false;">退出</a>');
+        from.value = me.id;
+        from.disabled = true;   // 登录后锁定身份，防手改
+      } else {
+        info.textContent = '';
+        from.disabled = false;
+      }
+    }
+
+    async function doLogin() {
+      const id = document.getElementById('loginId').value.trim();
+      const pw = document.getElementById('loginPw').value;
+      if (!id || !pw) { alert('请输入员工 id 与口令'); return; }
+      const resp = await fetch('/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, password: pw }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) { alert(`登录失败：${data.error || resp.status}`); return; }
+      document.getElementById('loginPw').value = '';
+      setMe(data);
+    }
+
+    async function doLogout() {
+      await fetch('/api/logout', { method: 'POST' });
+      setMe(null);
+    }
+
+    async function loadChatHistory() {
+      const from = document.getElementById('chatFrom').value.trim();
+      if (!from) { alert('请先填写/登录我的员工 id'); return; }
+      const resp = await fetch(`/api/messages?who=${encodeURIComponent(from)}`);
+      if (!resp.ok) { alert('查询失败'); return; }
+      const { inbox, sent } = await resp.json();
+      const all = [...inbox, ...sent]
+        .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      const log = document.getElementById('chatLog');
+      log.innerHTML = '';
+      if (!all.length) {
+        chatLine('busy', '历史', '（暂无消息）');
+        return;
+      }
+      for (const m of all) {
+        chatLine(m.from === from ? 'me' : 'ai', `${m.from} → ${m.to}`, m.content);
+      }
     }
 
     async function loadOrg() {

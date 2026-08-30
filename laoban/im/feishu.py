@@ -4,14 +4,21 @@
   LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET   必填（两者齐全才启用）
   LAOBAN_FEISHU_BASE_URL       可选（默认 https://open.feishu.cn，测试/代理可覆盖）
   LAOBAN_FEISHU_VERIFICATION_TOKEN  可选（事件 token 校验，配置后不匹配返回 403）
+  LAOBAN_FEISHU_ENCRYPT_KEY    可选（事件加密，AES-256-CBC，key=SHA256(encrypt_key)）
+  LAOBAN_FEISHU_BOT_OPEN_ID    可选（群聊 @提及识别；未配置时任何 @ 都视为 @机器人）
   LAOBAN_IM_DEFAULT_TO         可选（IM 消息不写「同事id:」时的默认收件人）
 
-事件格式：飞书 2.0（schema=2.0，im.message.receive_v1，明文模式）。
+事件格式：飞书 2.0（schema=2.0，im.message.receive_v1，明文或加密模式）。
+群聊规则：chat_type=group 且 @了机器人才处理（否则忽略不吵群）；@提及
+token（@_user_1）从文本剥离后再解析「同事id: 内容」；回信/错误提示/投递
+回执推回群（chat_id），人→人中转仍走对方 DM。
 ACK 策略：收到事件立即 200（飞书要求 3 秒内 ACK），LLM 回信放后台线程生成，
 生成后经消息 API 推回；event_id 去重防重试风暴。
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import threading
@@ -26,6 +33,22 @@ from .router import route_inbound
 
 DEFAULT_BASE = "https://open.feishu.cn"
 _SEEN_CAP = 512   # event_id 去重窗口
+
+# 可选加密库：pycryptodome 或 cryptography 任一即可（都缺失时加密事件不可用）
+_AES = None
+_unpad = None
+try:
+    from Crypto.Cipher import AES as _AES
+    from Crypto.Util.Padding import unpad as _unpad
+    _HAS_CRYPTO = True
+except ImportError:
+    try:
+        from cryptography.hazmat.primitives.ciphers import (Cipher as _Cipher,
+            algorithms as _alg, modes as _modes)
+        from cryptography.hazmat.primitives.padding import PKCS7 as _PKCS7
+        _HAS_CRYPTO = True
+    except ImportError:
+        _HAS_CRYPTO = False
 
 
 class FeishuError(Exception):
@@ -67,11 +90,11 @@ class FeishuClient:
         self._token_expire_at = time.time() + float(body.get("expire", 3600))
         return token
 
-    def send_text(self, open_id: str, text: str) -> dict:
+    def _send_text(self, receive_id_type: str, receive_id: str, text: str) -> dict:
         token = self._tenant_token()
         body = self._post(
-            "/open-apis/im/v1/messages?receive_id_type=open_id",
-            {"receive_id": open_id, "msg_type": "text",
+            f"/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
+            {"receive_id": receive_id, "msg_type": "text",
              "content": json.dumps({"text": text}, ensure_ascii=False)},
             token=token)
         if body.get("code", 0) != 0:
@@ -79,24 +102,80 @@ class FeishuClient:
                               f"msg={body.get('msg')}")
         return body
 
+    def send_text(self, open_id: str, text: str) -> dict:
+        """私聊发送（open_id）。"""
+        return self._send_text("open_id", open_id, text)
+
+    def send_text_chat(self, chat_id: str, text: str) -> dict:
+        """群聊发送（chat_id，回信入群）。"""
+        return self._send_text("chat_id", chat_id, text)
+
+
+def _aes_cbc_decrypt(key: bytes, iv: bytes, ct: bytes) -> bytes:
+    if _AES is not None:
+        return _unpad(_AES.new(key, _AES.MODE_CBC, iv).decrypt(ct), 16)
+    dec = _Cipher(_alg.AES(key), _modes.CBC(iv)).decryptor()
+    padded = dec.update(ct) + dec.finalize()
+    u = _PKCS7(128).unpadder()
+    return u.update(padded) + u.finalize()
+
+
+def _decrypt_event(encrypt_b64: str, encrypt_key: str) -> dict:
+    """解密事件体：AES-256-CBC（key=SHA256(encrypt_key)）→ JSON dict。
+
+    兼容两种密文格式：飞书标准（前 16 字节为随机 IV）/ 简化（IV 全 0）。
+    """
+    key = hashlib.sha256(encrypt_key.encode()).digest()
+    raw = base64.b64decode(encrypt_b64)
+    candidates = []
+    if len(raw) > 16:
+        candidates.append((raw[:16], raw[16:]))
+    candidates.append((b"\x00" * 16, raw))
+    for iv, ct in candidates:
+        if not ct:
+            continue
+        try:
+            data = json.loads(_aes_cbc_decrypt(key, iv, ct).decode("utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise FeishuError("解密失败：密文或 encrypt_key 不正确")
+
 
 class FeishuWebhook:
     """飞书事件回调处理器：URL 验证 + 消息事件 → router → 回信推回。"""
 
     def __init__(self, store: JsonStore, gateway: LLMGateway | None,
                  client: FeishuClient, bindings: Bindings,
-                 verification_token: str = "", default_to: str = ""):
+                 verification_token: str = "", default_to: str = "",
+                 encrypt_key: str = "", bot_open_id: str = ""):
         self.store = store
         self.gateway = gateway
         self.client = client
         self.bindings = bindings
         self.default_to = default_to
         self._token = verification_token or getattr(client, "verification_token", "")
+        self._encrypt_key = encrypt_key
+        self._bot_open_id = bot_open_id or os.environ.get(
+            "LAOBAN_FEISHU_BOT_OPEN_ID", "").strip()
         self._seen: deque[str] = deque(maxlen=_SEEN_CAP)
         self._seen_set: set[str] = set()
 
     def handle(self, body: dict, background: bool = True) -> tuple[int, dict]:
         """处理一条事件 JSON，返回 (HTTP 状态码, 响应体)。"""
+        if isinstance(body, dict) and body.get("encrypt"):
+            if not self._encrypt_key:
+                return 400, {"error": "收到加密事件但未配置 encrypt_key"
+                             "（LAOBAN_FEISHU_ENCRYPT_KEY）"}
+            if not _HAS_CRYPTO:
+                return 500, {"error": "解密需要 pycryptodome 或 cryptography"
+                             "（pip install pycryptodome）"}
+            try:
+                body = _decrypt_event(body["encrypt"], self._encrypt_key)
+            except Exception as e:
+                return 400, {"error": f"解密失败：{e}"}
+
         if body.get("type") == "url_verification":
             return 200, {"challenge": body.get("challenge", "")}
 
@@ -120,6 +199,16 @@ class FeishuWebhook:
         sender_id = event.get("sender", {}).get("sender_id", {})
         im_user = (sender_id.get("open_id") or sender_id.get("user_id") or "").strip()
         message = event.get("message", {})
+        mentions = [m for m in (message.get("mentions", []) or [])
+                    if isinstance(m, dict)]
+
+        # 群聊：未 @机器人 → 忽略（不吵群）；@了 → 回信进群（chat_id）
+        reply_chat_id = ""
+        if message.get("chat_type", "p2p") == "group":
+            if not self._mentioned_bot(mentions):
+                return 200, {"code": 0}
+            reply_chat_id = message.get("chat_id", "")
+
         if message.get("message_type") != "text":
             if im_user:
                 self._notify(im_user, "暂仅支持文本消息")
@@ -128,22 +217,45 @@ class FeishuWebhook:
             text = json.loads(message.get("content", "{}")).get("text", "")
         except (json.JSONDecodeError, TypeError, AttributeError):
             text = ""
-        if not text.strip() or not im_user:
+        # 剥离 @提及 token（@_user_1 等），再解析「同事id: 内容」
+        for m in mentions:
+            key = m.get("key", "")
+            if key:
+                text = text.replace(key, "")
+        text = text.strip()
+        if not text or not im_user:
             return 200, {"code": 0}
 
-        work = lambda: self._process(im_user, text)   # noqa: E731
+        work = lambda: self._process(im_user, text, reply_chat_id)   # noqa: E731
         if background:
             threading.Thread(target=work, daemon=True).start()
         else:
             work()
         return 200, {"code": 0}
 
-    def _process(self, im_user: str, text: str) -> None:
+    def _mentioned_bot(self, mentions: list) -> bool:
+        """群聊事件里是否 @了机器人。"""
+        for m in mentions:
+            mid = m.get("id") or {}
+            if self._bot_open_id:
+                if (mid.get("open_id") == self._bot_open_id
+                        or mid.get("user_id") == self._bot_open_id):
+                    return True
+            else:
+                # 未配置 bot open_id：事件能进来说明大概率 @的是机器人
+                return True
+        return False
+
+    def _process(self, im_user: str, text: str, chat_id: str = "") -> None:
         try:
+            if chat_id:
+                reply = lambda t: self.client.send_text_chat(chat_id, t)   # noqa: E731
+            else:
+                reply = lambda t: self.client.send_text(im_user, t)        # noqa: E731
             result = route_inbound(self.store, self.gateway, self.bindings,
                                    "feishu", im_user, text,
                                    push=self.client.send_text,
-                                   default_to=self.default_to)
+                                   default_to=self.default_to, reply=reply)
             print(f"[IM:feishu] {result.get('summary', '')}")
         except Exception as e:   # 渠道线程兜底：任何异常都不能静默丢消息
             print(f"[IM:feishu] 处理失败（{im_user}）：{e!r}")
