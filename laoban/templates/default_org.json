@@ -1,0 +1,123 @@
+{
+  "company": "老板科技有限公司",
+  "business": "跨境电商工具",
+  "departments": [
+    {
+      "id": "hr_dept",
+      "name": "人力资源部",
+      "mission": "组织设计、人岗匹配与编制管理",
+      "roles": [
+        {
+          "id": "hr",
+          "name": "HR 专家",
+          "kind": "ai",
+          "title": "组织设计",
+          "founder": true,
+          "model": {"provider": "hr", "model": "mock"},
+          "job_description": {"mission": "根据业务构想设计部门与岗位职责"},
+          "permissions": {"autonomy_level": "semi"}
+        }
+      ]
+    },
+    {
+      "id": "legal_dept",
+      "name": "法务合规部",
+      "mission": "合规把关与产出评审",
+      "roles": [
+        {
+          "id": "legal",
+          "name": "法务专家",
+          "kind": "ai",
+          "title": "合规把关",
+          "founder": true,
+          "model": {"provider": "legal", "model": "mock"},
+          "job_description": {"mission": "识别业务与产出中的合规风险"},
+          "permissions": {"autonomy_level": "supervised"}
+        },
+        {
+          "id": "reviewer",
+          "name": "严审",
+          "kind": "ai",
+          "title": "评审员",
+          "model": {"provider": "reviewer", "model": "mock"},
+          "job_description": {"mission": "评审任务产出，决定通过或封驳"},
+          "permissions": {"autonomy_level": "supervised", "spending_limit_per_task": 2.0}
+        }
+      ]
+    },
+    {
+      "id": "it_dept",
+      "name": "信息技术部",
+      "mission": "工具接入与权限基础设施",
+      "roles": [
+        {
+          "id": "it",
+          "name": "IT 专家",
+          "kind": "ai",
+          "title": "工具与权限",
+          "founder": true,
+          "model": {"provider": "it", "model": "mock"},
+          "job_description": {"mission": "选型工具并配置员工权限"},
+          "permissions": {"autonomy_level": "supervised"}
+        }
+      ]
+    },
+    {
+      "id": "ops_dept",
+      "name": "运营部",
+      "mission": "任务分拣与项目推进",
+      "roles": [
+        {
+          "id": "receptionist",
+          "name": "小助",
+          "kind": "ai",
+          "title": "前台分拣",
+          "model": {"provider": "receptionist", "model": "mock"},
+          "job_description": {"mission": "接收任务并分拣到对应流程"},
+          "permissions": {"autonomy_level": "full", "spending_limit_per_task": 1.0}
+        },
+        {
+          "id": "pm",
+          "name": "老谋",
+          "kind": "ai",
+          "title": "项目经理",
+          "model": {"provider": "pm", "model": "mock"},
+          "job_description": {"mission": "拆解任务并派发给合适员工"},
+          "permissions": {"can_assign_human_tasks": true, "autonomy_level": "semi"}
+        }
+      ]
+    },
+    {
+      "id": "dev_dept",
+      "name": "研发部",
+      "mission": "功能开发与数据交付",
+      "roles": [
+        {
+          "id": "dev",
+          "name": "阿码",
+          "kind": "ai",
+          "title": "开发工程师",
+          "model": {"provider": "dev", "model": "mock"},
+          "job_description": {"mission": "按任务要求产出代码与数据交付物"},
+          "capabilities": {"tools": ["python_exec", "file_write"]},
+          "permissions": {"can_assign_human_tasks": true, "autonomy_level": "semi", "spending_limit_per_task": 5.0}
+        },
+        {
+          "id": "emp-chen",
+          "name": "陈工",
+          "kind": "human",
+          "title": "数据核查员",
+          "job_description": {"mission": "人工核查数据异常值"},
+          "permissions": {"can_assign_human_tasks": true}
+        },
+        {
+          "id": "emp-xiaoli",
+          "name": "小李",
+          "kind": "human",
+          "title": "初级核查员",
+          "job_description": {"mission": "复核数据核查结果"}
+        }
+      ]
+    }
+  ]
+}

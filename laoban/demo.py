@@ -6,11 +6,11 @@ from datetime import date
 from .core.store import JsonStore
 from .core.task import Task, PENDING, TRIAGE, PLANNING, REVIEW, ASSIGNED, DOING, WAITING_HUMAN, REPORTING, DONE
 from .core.state_machine import advance
-from .core.employee import Employee
 from .core.human_inbox import HumanInbox
 from .core.ledger import Ledger
 from .core.feedback import write_back_experience
 from .bootstrap import bootstrap_org
+from .org import load_org, instantiate, iter_roles
 from .llm.gateway import LLMGateway
 from .llm.mock import MockLLM
 
@@ -20,25 +20,24 @@ def run_demo() -> int:
 
     root = tempfile.mkdtemp(prefix="laoban-demo-")
     store = JsonStore(root)
+    org = load_org()          # v0.2：组织结构来自 org.json 配置
     gw = LLMGateway()
-    for pid in ("hr", "legal", "it", "receptionist", "pm", "reviewer", "dev"):
-        gw.register_mock(pid, MockLLM(responses=[f"[{pid}] 已完成本职工作"]))
+    for _dept, role in iter_roles(org):
+        if role.get("kind", "ai") == "ai":
+            pid = role.get("model", {}).get("provider", role["id"])
+            gw.register_mock(pid, MockLLM(responses=[f"[{pid}] 已完成本职工作"]))
 
-    # ── 1. 启动模式：三元老入职，产出组织设计建议 ──
+    # ── 1. 启动模式：创始人入职（org.json 中 founder: true 的角色）──
     print("【1】启动模式：三元老（HR / 法务 / IT）入职")
     plan = bootstrap_org(store, gw, business="做跨境电商工具")
     print(f"    组织设计方案：{plan['组织设计方案']}")
     for pid in ("hr", "legal", "it"):
         print(f"    {pid} 建议：{plan[pid]}")
 
-    # ── 2. 双轨招聘：业务团队（AI 员工 + 人类员工同部门）──
-    print("\n【2】组建业务团队：AI 与人类员工同部门协作")
-    store.save_employee(Employee(id="receptionist", name="小助", title="前台分拣", department="ops_dept"))
-    store.save_employee(Employee(id="pm", name="老谋", title="项目经理", department="ops_dept"))
-    store.save_employee(Employee(id="reviewer", name="严审", title="评审员", department="legal_dept"))
-    store.save_employee(Employee(id="dev", name="阿码", title="开发工程师", department="dev_dept"))
-    store.save_employee(Employee(id="emp-chen", name="陈工", kind="human",
-                                 title="数据核查员", department="dev_dept"))
+    # ── 2. 双轨招聘：业务团队按 org.json 配置入职（AI 与人类同部门）──
+    print("\n【2】组建业务团队（org.json 配置驱动）：AI 与人类员工同部门协作")
+    team = instantiate(store, org, which="team")
+    print(f"    已按配置入职 {len(team)} 名员工")
     for e in store.list_employees():
         kind = "人类" if e.kind == "human" else "AI"
         print(f"    [{kind}] {e.name}（{e.id}）· {e.title} · {e.department}")
@@ -76,8 +75,6 @@ def run_demo() -> int:
     print("    ✔ 陈工完成待办，流程恢复")
 
     # 人→人闭环：陈工把复核工作派给同部门的小李，小李完成后结果回传陈工
-    store.save_employee(Employee(id="emp-xiaoli", name="小李", kind="human",
-                                 title="初级核查员", department="dev_dept"))
     ht2 = inbox.create(task_id=task.id, title="复核 12 条异常记录", assignee="emp-xiaoli",
                        source="self", created_by="emp-chen")
     print(f"\n【4.5】人→人派活：陈工 → 小李（{ht2.id}）")

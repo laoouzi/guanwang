@@ -29,6 +29,20 @@ def _build_parser() -> argparse.ArgumentParser:
     hire.add_argument("--reports-to", default="")
     hire.add_argument("--id", default="")
 
+    org = sub.add_parser("org", help="组织配置（v0.2：org.json 驱动部门/岗位/权限）")
+    org_sub = org.add_subparsers(dest="org_command", required=True)
+    oi = org_sub.add_parser("init-config", help="生成 org.json 模板（默认 .laoban/org.json）")
+    oi.add_argument("--root", default=".laoban")
+    oi.add_argument("--force", action="store_true", help="覆盖已有配置")
+    os_show = org_sub.add_parser("show", help="查看组织配置（org.json 优先，否则内置模板）")
+    os_show.add_argument("--root", default=".laoban")
+    os_show.add_argument("--file", default="", help="指定 org.json 路径")
+    ol = org_sub.add_parser("load", help="按组织配置批量入职员工")
+    ol.add_argument("--root", default=".laoban")
+    ol.add_argument("--file", default="", help="指定 org.json 路径")
+    ol.add_argument("--founders-only", action="store_true", help="仅入职创始人角色")
+    ol.add_argument("--team-only", action="store_true", help="仅入职非创始人角色")
+
     emp_list = sub.add_parser("employees", help="列出员工")
     emp_list.add_argument("--root", default=".laoban")
 
@@ -107,6 +121,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"已入职（{kind_label}）：{emp.name}（{emp.id}）"
               + (f"，部门：{emp.department}" if emp.department else ""))
         return 0
+
+    if cmd == "org":
+        from .org import (DEFAULT_TEMPLATE, init_config, instantiate, load_org,
+                          resolve_org_path, summary)
+        if args.org_command == "init-config":
+            try:
+                p = init_config(Path(args.root) / "org.json", force=args.force)
+            except FileExistsError as e:
+                print(f"⚠️ {e}")
+                return 1
+            print(f"组织配置已生成：{p}")
+            print("编辑部门/岗位/权限后运行 laoban org load 应用到公司")
+            return 0
+        if args.org_command == "show":
+            path = resolve_org_path(args.file or None, args.root)
+            org = load_org(path)
+            src = "内置默认模板" if path == DEFAULT_TEMPLATE else "用户配置"
+            print(f"（{src}）{path}")
+            print(summary(org))
+            return 0
+        if args.org_command == "load":
+            path = resolve_org_path(args.file or None, args.root)
+            org = load_org(path)
+            which = ("founders" if args.founders_only
+                     else "team" if args.team_only else "all")
+            st = JsonStore(args.root)
+            emps = instantiate(st, org, which=which)
+            label = {"founders": "创始人", "team": "业务团队", "all": "全部"}[which]
+            print(f"已按配置入职 {len(emps)} 名员工（{label}）")
+            for e in emps:
+                kind = "人类" if e.kind == "human" else "AI"
+                print(f"  {e.id}\t[{kind}]\t{e.name}\t{e.title}\t{e.department}")
+            return 0
 
     if cmd == "employees":
         st = JsonStore(args.root)

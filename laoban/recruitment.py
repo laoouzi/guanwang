@@ -4,6 +4,7 @@ import uuid
 
 from .core.store import JsonStore
 from .core.employee import Employee
+from .org import build_employee, find_role, load_org_for_store
 
 HIRE_TYPES = ("new_ai", "clone_ai", "hire_human")
 
@@ -61,14 +62,27 @@ def approve_headcount(store: JsonStore, req_id: str, approver: str) -> Employee:
         if req.get("department"):
             emp.department = req["department"]
     else:
-        emp = Employee(
-            id=f"emp-{uuid.uuid4().hex[:6]}",
-            name=f"新员工-{req_id[-6:]}",
-            kind="human" if hire_type == "hire_human" else "ai",
-            title=req.get("role", ""),
-            department=req.get("department", ""),
-            source="hired",
-        )
+        # v0.2：role 命中 org.json 岗位模板 → 套用模板（模型/权限/职责）入职
+        emp_id = f"emp-{uuid.uuid4().hex[:6]}"
+        template = find_role(load_org_for_store(store), req.get("role", ""))
+        if template:
+            dept, role = template
+            emp = build_employee(dept, role)
+            emp.id = emp_id
+            emp.name = role["name"]
+            emp.kind = "human" if hire_type == "hire_human" else "ai"
+            if req.get("department"):
+                emp.department = req["department"]
+            emp.source = "hired"
+        else:
+            emp = Employee(
+                id=emp_id,
+                name=f"新员工-{req_id[-6:]}",
+                kind="human" if hire_type == "hire_human" else "ai",
+                title=req.get("role", ""),
+                department=req.get("department", ""),
+                source="hired",
+            )
     store.save_employee(emp)
 
     req["status"] = "approved"

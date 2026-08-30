@@ -7,6 +7,9 @@ laoban 是一个开源、自托管的多 Agent 编排框架：让你像经营真
 ```bash
 pip install -e .
 laoban demo              # 演示模式（无需 API Key，MockLLM 跑通全流程含人机协作）
+laoban org init-config   # 生成组织配置模板 .laoban/org.json（部门/岗位/权限）
+laoban org show          # 查看组织配置（org.json 优先，否则内置默认模板）
+laoban org load          # 按配置批量入职（--founders-only / --team-only 可选）
 laoban init              # 初始化你的公司目录（.laoban/）
 laoban hire --name 阿码 --title 开发工程师 --department dev_dept
 laoban hire --name 陈工 --kind human --title 数据核查员 --department dev_dept
@@ -26,8 +29,8 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 | 任务状态机 | pending → triage → planning → review ⇄ 驳回(≤3 轮) → assigned → doing ⇄ waiting_human → reporting → done |
 | 权限矩阵 | 协作权限 / 工具权限 / 支出限额 / 自主等级（supervised/semi/full） |
 | 审批队列 | 高危操作 + 支出授权 + 编制申请统一审批单，容量/时间联合触发批量处理 |
-| 启动模式 | 创业三元老（HR/法务/IT）基于业务构想产出组织设计方案 |
-| 双轨招聘 | 轨道 A：老板直招；轨道 B：部门负责人编制申请（新增 AI / 复制 AI / 招聘人类）→ 审批 → 入职 |
+| 启动模式 | 创业三元老（HR/法务/IT）基于业务构想产出组织设计方案；组织结构由 `org.json` 配置驱动（v0.2） |
+| 双轨招聘 | 轨道 A：老板直招；轨道 B：部门负责人编制申请（新增 AI / 复制 AI / 招聘人类）→ 审批 → 入职；role 命中 `org.json` 岗位模板时自动套用模型/权限 |
 | 绩效账本 | 完成数 / 成本 / 驳回率 / **人类介入率**（衡量 AI 自主程度） |
 | 经验回写 | 人类验收评分（1-5）回写员工记忆，越用越懂你的业务 |
 | 人类待办收件箱 | AI 超出能力时派发结构化人类待办（背景+目标+交付物格式+截止），完成后流程自动恢复 |
@@ -39,6 +42,44 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 - **交互层**（`laoban/cli.py`、`laoban/dashboard/`）：CLI 完整子命令 + Web 看板（标准库 HTTP，零第三方依赖）
 
 ## 配置参考
+
+### 组织配置 org.json（v0.2）
+
+部门/岗位/权限全部配置化：`laoban org init-config` 生成 `.laoban/org.json`，
+编辑后 `laoban org load` 批量入职。未提供配置时使用内置默认模板
+（`laoban/templates/default_org.json`：5 部门 9 岗位，含三元老创始人）。
+
+```json
+{
+  "company": "我的公司",
+  "business": "跨境电商工具",
+  "departments": [
+    {
+      "id": "dev_dept", "name": "研发部", "mission": "功能开发与数据交付",
+      "roles": [
+        {
+          "id": "dev", "name": "阿码", "kind": "ai", "title": "开发工程师",
+          "founder": false,
+          "model": {"provider": "deepseek", "model": "deepseek-chat"},
+          "job_description": {"mission": "按任务要求产出代码与数据交付物"},
+          "capabilities": {"tools": ["python_exec", "file_write"]},
+          "permissions": {"can_assign_human_tasks": true,
+                          "spending_limit_per_task": 5.0, "autonomy_level": "semi"}
+        },
+        {"id": "emp-chen", "name": "陈工", "kind": "human", "title": "数据核查员"}
+      ]
+    }
+  ]
+}
+```
+
+规则：
+- 岗位字段 `model` / `job_description` / `performance_goals` / `capabilities` / `permissions`
+  为**合并覆盖**（缺省字段用 `Employee` 默认值兜底）；
+- `founder: true` 的角色 = 启动模式创始人（`bootstrap` 只入职这些人）；
+- 双轨招聘编制申请的 `role` 按**岗位 id 或 title** 命中模板时，新员工自动套用该岗位的
+  模型/权限/职责（`kind` 以申请单为准）；
+- 配置查找顺序：显式 `--file` → `{root}/org.json` → 内置默认模板。
 
 ### 员工档案字段（`Employee` dataclass）
 
@@ -116,6 +157,7 @@ laoban acceptance run --root /tmp/laoban-acc
 
 ```
 .laoban/                      # laoban init 生成
+├── org.json                  # 组织配置（laoban org init-config 生成，可选）
 ├── tasks/<id>.json           # 任务档案（含 flow_log + progress_log）
 ├── employees/<id>.json       # 员工档案
 ├── human_tasks/<id>.json     # 人类待办（AI 派发的配合任务 / 自建 / 老板指派）
