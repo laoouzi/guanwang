@@ -61,6 +61,10 @@ def _build_parser() -> argparse.ArgumentParser:
     today.add_argument("--who", required=True, help="员工 id")
     today.add_argument("--date", default="", help="日期 YYYY-MM-DD（默认今天）")
 
+    dash = sub.add_parser("dashboard", help="启动 Web 看板（默认 127.0.0.1:7891）")
+    dash.add_argument("--root", default=".laoban")
+    dash.add_argument("--port", type=int, default=7891)
+
     return p
 
 
@@ -136,6 +140,17 @@ def main(argv: list[str] | None = None) -> int:
             src = {"ai_delegated": "AI 派发", "self": "自建", "boss": "老板指派"}.get(ht.source, ht.source)
             due = f"，截止 {ht.due_date}" if ht.due_date else ""
             print(f"  [{src}] {ht.title}（{ht.id}{due}）")
+        return 0
+
+    if cmd == "dashboard":
+        from .dashboard.server import DashboardServer
+        st = JsonStore(args.root)
+        server = DashboardServer(st, port=args.port)
+        print(f"看板已启动：http://127.0.0.1:{server.port}/ （Ctrl+C 退出）")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\n看板已停止")
         return 0
 
     return 1
