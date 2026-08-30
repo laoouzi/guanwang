@@ -1,0 +1,53 @@
+import unittest
+from laoban.core.task import (
+    Task, PENDING, TRIAGE, PLANNING, REVIEW, ASSIGNED, DOING,
+    WAITING_HUMAN, REPORTING, DONE, CANCELLED, BLOCKED,
+)
+from laoban.core.state_machine import (
+    advance, can_transition, IllegalTransition, MAX_REVIEW_ROUNDS,
+)
+
+
+class TestStateMachine(unittest.TestCase):
+    def test_happy_path(self):
+        t = Task(id="T-1", title="x")
+        for s in [TRIAGE, PLANNING, REVIEW, ASSIGNED, DOING, REPORTING, DONE]:
+            advance(t, s, actor="boss")
+        self.assertEqual(t.state, DONE)
+        self.assertEqual(len(t.flow_log), 7)
+
+    def test_illegal_jump_rejected(self):
+        t = Task(id="T-1", title="x")  # pending
+        with self.assertRaises(IllegalTransition):
+            advance(t, DOING)
+
+    def test_terminal_blocks_advance(self):
+        t = Task(id="T-1", title="x", state=DONE)
+        ok, _ = can_transition(t, TRIAGE)
+        self.assertFalse(ok)
+
+    def test_cancel_anywhere(self):
+        t = Task(id="T-1", title="x", state=DOING)
+        advance(t, CANCELLED)
+        self.assertEqual(t.state, CANCELLED)
+
+    def test_reject_increments_round(self):
+        t = Task(id="T-1", title="x", state=REVIEW)
+        advance(t, PLANNING, actor="reviewer", remark="封驳")
+        self.assertEqual(t.review_round, 1)
+        self.assertEqual(t.state, PLANNING)
+
+    def test_reject_beyond_max_rounds(self):
+        t = Task(id="T-1", title="x", state=REVIEW, review_round=MAX_REVIEW_ROUNDS)
+        with self.assertRaises(IllegalTransition):
+            advance(t, PLANNING)
+
+    def test_waiting_human_roundtrip(self):
+        t = Task(id="T-1", title="x", state=DOING)
+        advance(t, WAITING_HUMAN)
+        advance(t, DOING)
+        self.assertEqual(t.state, DOING)
+
+
+if __name__ == "__main__":
+    unittest.main()
