@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -78,6 +79,20 @@ def _build_parser() -> argparse.ArgumentParser:
     tst = task_sub.add_parser("status", help="查看任务状态")
     tst.add_argument("--root", default=".laoban")
     tst.add_argument("--id", default="")
+
+    im_p = sub.add_parser("im", help="IM 渠道接入（飞书等 ↔ 消息总线）")
+    im_sub = im_p.add_subparsers(dest="im_command", required=True)
+    ib = im_sub.add_parser("bind", help="绑定 IM 账号 ↔ 员工 id")
+    ib.add_argument("--root", default=".laoban")
+    ib.add_argument("--platform", default="feishu", help="IM 平台（默认 feishu）")
+    ib.add_argument("--im-user", required=True, help="IM 用户标识（飞书 open_id，如 ou_xxx）")
+    ib.add_argument("--employee", required=True, help="员工 id")
+    iu = im_sub.add_parser("unbind", help="解绑 IM 账号")
+    iu.add_argument("--root", default=".laoban")
+    iu.add_argument("--platform", default="feishu")
+    iu.add_argument("--im-user", required=True)
+    il = im_sub.add_parser("list", help="查看绑定表")
+    il.add_argument("--root", default=".laoban")
 
     todo = sub.add_parser("todo", help="人类待办操作")
     todo_sub = todo.add_subparsers(dest="todo_command", required=True)
@@ -290,6 +305,32 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{t.id}\t{t.state}\t{t.title}")
             return 0
 
+    if cmd == "im":
+        from .im.binding import Bindings
+        st = JsonStore(args.root)
+        bd = Bindings(st.root)
+        if args.im_command == "bind":
+            emp = st.load_employee(args.employee)
+            if not emp:
+                print(f"⚠️ 员工不存在：{args.employee}")
+                return 1
+            bd.bind(args.platform, args.im_user, args.employee)
+            print(f"已绑定：{args.platform}:{args.im_user} ↔ {emp.name}（{emp.id}）")
+            return 0
+        if args.im_command == "unbind":
+            ok = bd.unbind(args.platform, args.im_user)
+            print("已解绑" if ok else f"⚠️ 未找到绑定：{args.platform}:{args.im_user}")
+            return 0 if ok else 1
+        if args.im_command == "list":
+            items = bd.list()
+            if not items:
+                print("绑定表为空（laoban im bind 添加）")
+                return 0
+            print(f"IM 绑定表（{len(items)} 条）：")
+            for b in items:
+                print(f"  {b['platform']}\t{b['im_user']}\t→ {b['employee']}")
+            return 0
+
     if cmd == "todo":
         st = JsonStore(args.root)
         inbox = HumanInbox(st)
@@ -360,7 +401,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             gw = None
             print("未检测到 LLM Key（LAOBAN_MOONSHOT_API_KEY 等），聊天不可用，看板其余功能正常")
-        server = DashboardServer(st, port=args.port, gateway=gw)
+        # 飞书接入：事件回调 URL 填 http://<主机>:<端口>/api/im/webhook/feishu
+        feishu_hook = None
+        from .im.binding import Bindings
+        from .im.feishu import FeishuWebhook, feishu_from_env
+        fs = feishu_from_env()
+        if fs is not None:
+            feishu_hook = FeishuWebhook(
+                st, gw, fs, Bindings(st.root),
+                default_to=os.environ.get("LAOBAN_IM_DEFAULT_TO", "").strip())
+            print(f"飞书接入已启用：事件回调 URL = http://<本机地址>:{args.port}/api/im/webhook/feishu"
+                  "（需公网可达或内网穿透）")
+        else:
+            print("未配置飞书（LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET），IM 渠道未启用")
+        server = DashboardServer(st, port=args.port, gateway=gw, feishu=feishu_hook)
         print(f"看板已启动：http://127.0.0.1:{server.port}/ （Ctrl+C 退出）")
         try:
             server.serve_forever()

@@ -15,6 +15,7 @@ from ..core.workstation import queue_of
 class _Handler(BaseHTTPRequestHandler):
     store: JsonStore = None  # 由工厂注入
     gateway = None           # 可选：聊天端点需要 LLM 网关
+    feishu = None            # 可选：飞书事件回调（IM 渠道入口）
 
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
@@ -65,6 +66,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "question": result["question"],
                 "reply": result["reply"],
             })
+        if u.path == "/api/im/webhook/feishu":
+            if self.feishu is None:
+                return self._error(503, "未配置飞书接入（LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET）")
+            status, payload = self.feishu.handle(self._read_body())
+            return self._json(payload, status)
         return self._error(404, f"未知路径：{u.path}")
 
     def _who_required(self, u) -> str | None:
@@ -143,8 +149,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class DashboardServer:
-    def __init__(self, store: JsonStore, port: int = 7891, gateway=None):
-        handler = type("H", (_Handler,), {"store": store, "gateway": gateway})
+    def __init__(self, store: JsonStore, port: int = 7891, gateway=None,
+                 feishu=None):
+        handler = type("H", (_Handler,), {"store": store, "gateway": gateway,
+                                          "feishu": feishu})
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.port = self.httpd.server_address[1]
 

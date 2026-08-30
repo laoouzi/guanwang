@@ -173,6 +173,26 @@ gw.register_provider("my-llm", OpenAICompatibleProvider(
 `permissions.collaboration` **为空 = 组织内默认可联系任何人**；非空 = 白名单模式（只能联系白名单内员工）。
 非在职（suspended/terminated）员工不可发送消息。
 
+### 人↔AI 聊天与 IM 渠道接入
+
+消息总线是唯一事实源，渠道只是入口/出口：
+
+```bash
+# 1. 看板聊天框（配好 LLM Key 后 laoban dashboard，页面直接与 AI 员工对话）
+
+# 2. 飞书机器人接入
+export LAOBAN_FEISHU_APP_ID=cli_xxx
+export LAOBAN_FEISHU_APP_SECRET=xxx
+# 可选：LAOBAN_FEISHU_VERIFICATION_TOKEN（事件 token 校验）/ LAOBAN_IM_DEFAULT_TO（默认收件人）
+laoban im bind --platform feishu --im-user ou_xxx --employee emp-chen   # IM 账号 ↔ 员工
+laoban dashboard   # 事件回调 URL 填 http://<本机>:7891/api/im/webhook/feishu（需公网/内网穿透）
+```
+
+员工在飞书里给机器人发 `dev: 数据放哪了？`（格式「同事id: 内容」）→ 消息落总线 →
+AI 回信推回飞书；收件人是人类同事时只投递，若对方也绑定了则同步推送其 IM（人↔人经总线中转）。
+事件 ACK 后台线程回信（飞书 3 秒 ACK 要求），event_id 去重防重试风暴。
+当前支持飞书 2.0 明文事件（DM 文本）；加密事件与群聊 @ 提及暂未支持。
+
 ### 验收套件（D2）
 
 ```bash
@@ -193,6 +213,7 @@ laoban acceptance run --root /tmp/laoban-acc
 ├── tasks/<id>.json           # 任务档案（含 flow_log + progress_log）
 ├── employees/<id>.json       # 员工档案
 ├── messages/<id>.json        # 点对点消息（MSG-*）
+├── im_bindings.json          # IM 账号 ↔ 员工 id 绑定表（laoban im bind）
 ├── human_tasks/<id>.json     # 人类待办（AI 派发的配合任务 / 自建 / 老板指派）
 ├── headcount_requests/       # 编制申请（双轨招聘）
 ├── approvals/<id>.json       # 审批日志（高危必记）
