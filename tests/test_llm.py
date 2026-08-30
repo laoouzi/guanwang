@@ -26,5 +26,27 @@ class TestMockLLM(unittest.TestCase):
         self.assertTrue(len(llm.chat([]).content) > 0)
 
 
+from laoban.llm.gateway import LLMGateway
+
+
+class TestLLMGateway(unittest.TestCase):
+    def test_route_to_mock(self):
+        gw = LLMGateway()
+        gw.register_mock("mock", MockLLM(responses=["hi"]))
+        resp = gw.chat("mock", [Message(role="user", content="x")])
+        self.assertEqual(resp.content, "hi")
+
+    def test_unknown_provider_raises(self):
+        gw = LLMGateway()
+        with self.assertRaises(KeyError):
+            gw.chat("nope", [])
+
+    def test_model_config_resolves_provider(self):
+        gw = LLMGateway()
+        gw.register_mock("deepseek", MockLLM(responses=["ds"]))
+        resp = gw.chat_for_employee({"provider": "deepseek", "model": "deepseek-chat"}, [])
+        self.assertEqual(resp.content, "ds")
+
+
 if __name__ == "__main__":
     unittest.main()
