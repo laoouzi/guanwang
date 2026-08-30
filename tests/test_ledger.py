@@ -1,5 +1,7 @@
 import unittest
 from laoban.core.ledger import Ledger
+from laoban.core.employee import Employee
+from laoban.core.feedback import write_back_experience
 
 
 class TestLedger(unittest.TestCase):
@@ -34,6 +36,19 @@ class TestLedger(unittest.TestCase):
         s = lg.stats("nobody")
         self.assertEqual(s["completion_count"], 0)
         self.assertEqual(s["human_intervention_rate"], 0.0)
+
+
+class TestFeedback(unittest.TestCase):
+    def test_write_back(self):
+        emp = Employee(id="dev", name="阿码")
+        write_back_experience(emp, task_type="bugfix", score=4, comment="先读测试")
+        self.assertEqual(len(emp.memory["experiences"]), 1)
+        self.assertEqual(emp.memory["experiences"][0]["outcome"], "success")
+
+    def test_low_score_marked_failure(self):
+        emp = Employee(id="dev", name="阿码")
+        write_back_experience(emp, task_type="bugfix", score=1, comment="")
+        self.assertEqual(emp.memory["experiences"][0]["outcome"], "failure")
 
 
 if __name__ == "__main__":
