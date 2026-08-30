@@ -20,17 +20,19 @@ def make_gateway():
 def make_employees():
     return {
         "receptionist": Employee(id="receptionist", name="小助",
+                                 model_config={"provider": "receptionist"},
                                  permissions={"autonomy_level": "supervised", "collaboration": []}),
-        "pm": Employee(id="pm", name="老谋"),
-        "reviewer": Employee(id="reviewer", name="严审"),
-        "dev": Employee(id="dev", name="阿码", capabilities={"tools": ["file_rw"]}),
+        "pm": Employee(id="pm", name="老谋", model_config={"provider": "pm"}),
+        "reviewer": Employee(id="reviewer", name="严审", model_config={"provider": "reviewer"}),
+        "dev": Employee(id="dev", name="阿码", model_config={"provider": "dev"},
+                        capabilities={"tools": ["file_rw"]}),
     }
 
 
 class TestRunner(unittest.TestCase):
     def test_run_returns_content(self):
         r = Runner(make_gateway())
-        emp = Employee(id="dev", name="阿码")
+        emp = Employee(id="dev", name="阿码", model_config={"provider": "dev"})
         out = r.run(emp, Task(id="T-1", title="x"))
         self.assertIn("[dev]", out)
 

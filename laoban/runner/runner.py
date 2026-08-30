@@ -24,5 +24,5 @@ class Runner:
             Message(role="system", content=system),
             Message(role="user", content=f"任务：{task.title}"),
         ]
-        resp = self.gateway.chat(employee.id, messages)
+        resp = self.gateway.chat_for_employee(employee.model_config, messages)
         return resp.content
