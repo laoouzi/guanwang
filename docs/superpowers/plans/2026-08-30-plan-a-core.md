@@ -757,5 +757,5 @@ cd /workspace && git add laoban/cli.py tests/test_cli.py && git commit -m "feat:
 
 ## 下一步（Plan B / C 边界，待本计划执行后细化）
 
-- **Plan B（执行引擎）**：在 `Employee` 上扩展完整人事档案字段（mission/duties/performance_goals/model_config/reports_to/autonomy_level 等，见设计文档 5.1）；新增 `laoban/llm/`（gateway + mock）、`laoban/runner/`（runner + tools + approval）、`laoban/core/dispatcher.py`、`laoban/core/scheduler.py`；MockLLM 驱动任务走完全流程。
-- **Plan C（交互与交付）**：完善 CLI 子命令（hire/task/approve/status）、`dashboard/`（单文件 HTML + 标准库 HTTP）、启动模式（三元老组织设计）、双轨招聘、绩效 Ledger（含人类介入率）、合规硬规则、标准验收套件、README、CI。
+- **Plan B（执行引擎）**：在 `Employee` 上扩展完整人事档案字段（mission/duties/performance_goals/model_config/reports_to/autonomy_level + **memory/workspace**，见设计文档 5.1）；新增 `laoban/llm/`（gateway + mock）、`laoban/runner/`（runner + tools + **approval_queue**）、`laoban/core/dispatcher.py`、`laoban/core/scheduler.py`、`laoban/core/memory.py`；MockLLM 驱动任务走完全流程。
+- **Plan C（交互与交付）**：完善 CLI 子命令（hire/task/approve/status）、`dashboard/`（单文件 HTML + 标准库 HTTP）、启动模式（三元老组织设计）、双轨招聘、绩效 Ledger（含人类介入率）、合规硬规则、经验回写、标准验收套件、README、CI。
