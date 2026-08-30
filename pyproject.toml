@@ -13,3 +13,6 @@ laoban = "laoban.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["laoban*"]
+
+[tool.setuptools.package-data]
+laoban = ["dashboard/dashboard.html"]

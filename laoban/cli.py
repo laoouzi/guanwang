@@ -65,6 +65,8 @@ def _build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--root", default=".laoban")
     dash.add_argument("--port", type=int, default=7891)
 
+    demo = sub.add_parser("demo", help="演示模式（MockLLM，无需 API Key）")
+
     return p
 
 
@@ -152,5 +154,9 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             print("\n看板已停止")
         return 0
+
+    if cmd == "demo":
+        from .demo import run_demo
+        return run_demo()
 
     return 1
