@@ -18,16 +18,43 @@
     .src-boss { color: #b71c1c; }
     #who { padding: 4px; }
     button { padding: 4px 12px; cursor: pointer; }
+    .status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+    .status.active { background: #e8f5e9; color: #2e7d32; }
+    .status.suspended { background: #fff3e0; color: #e65100; }
+    .status.terminated { background: #ffebee; color: #b71c1c; text-decoration: line-through; }
+    .dept { margin-top: 16px; }
+    .dept h3 { margin: 8px 0 4px; }
+    .queue-count { background: #e3f2fd; border-radius: 10px; padding: 0 8px; font-size: 12px; }
+    .msg-meta { color: #757575; font-size: 12px; }
+    .empty { color: #9e9e9e; padding: 8px; }
   </style>
 </head>
 <body>
   <h1>laoban 管理看板</h1>
 
+  <h2>组织架构</h2>
+  <div id="org"></div>
+
   <h2>任务</h2>
   <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th></tr></thead><tbody></tbody></table>
 
   <h2>员工花名册</h2>
-  <table id="employees"><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>部门</th></tr></thead><tbody></tbody></table>
+  <table id="employees"><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>部门</th><th>状态</th></tr></thead><tbody></tbody></table>
+
+  <h2>点对点消息</h2>
+  <p>
+    <input id="msgWho" placeholder="员工 id，如 dev" />
+    <button onclick="loadMessages()">查看收发件箱</button>
+  </p>
+  <table id="msgInbox"><thead><tr><th>ID</th><th>发件人 → 收件人</th><th>内容</th></tr></thead><tbody></tbody></table>
+  <table id="msgSent"><thead><tr><th>ID</th><th>发件人 → 收件人</th><th>内容</th></tr></thead><tbody></tbody></table>
+
+  <h2>工位任务队列</h2>
+  <p>
+    <input id="queueWho" placeholder="员工 id，如 dev" />
+    <button onclick="loadQueue()">查看队列</button>
+  </p>
+  <table id="queueTasks"><thead><tr><th>任务 ID</th><th>标题</th><th>状态</th></tr></thead><tbody></tbody></table>
 
   <h2>人类员工当日任务清单</h2>
   <p>
@@ -40,8 +67,16 @@
 
   <script>
     const SRC_LABEL = { ai_delegated: 'AI 派发', self: '自建', boss: '老板指派' };
+    const STATUS_LABEL = { active: '在职', suspended: '停职', terminated: '已解雇' };
     const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
       ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    function kindBadge(kind) {
+      return `<span class="kind ${esc(kind)}">${kind === 'human' ? '人类' : 'AI'}</span>`;
+    }
+    function statusBadge(status) {
+      return `<span class="status ${esc(status)}">${esc(STATUS_LABEL[status] || status)}</span>`;
+    }
 
     async function load() {
       const ts = await (await fetch('/api/tasks')).json();
@@ -49,8 +84,49 @@
         `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td><td>${esc(t.state)}</td></tr>`).join('');
       const es = await (await fetch('/api/employees')).json();
       document.querySelector('#employees tbody').innerHTML = es.map(e =>
-        `<tr><td>${esc(e.id)}</td><td><span class="kind ${esc(e.kind)}">${e.kind === 'human' ? '人类' : 'AI'}</span></td>` +
-        `<td>${esc(e.name)}</td><td>${esc(e.title)}</td><td>${esc(e.department)}</td></tr>`).join('');
+        `<tr><td>${esc(e.id)}</td><td>${kindBadge(e.kind)}</td>` +
+        `<td>${esc(e.name)}</td><td>${esc(e.title)}</td><td>${esc(e.department)}</td>` +
+        `<td>${statusBadge(e.status)}</td></tr>`).join('');
+      await loadOrg();
+    }
+
+    async function loadOrg() {
+      const depts = await (await fetch('/api/org')).json();
+      document.getElementById('org').innerHTML = depts.length ? depts.map(d =>
+        `<div class="dept"><h3>${esc(d.id)}（${d.employees.length} 人）</h3>` +
+        '<table><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>状态</th><th>在办</th></tr></thead><tbody>' +
+        d.employees.map(e =>
+          `<tr><td>${esc(e.id)}</td><td>${kindBadge(e.kind)}</td><td>${esc(e.name)}</td>` +
+          `<td>${esc(e.title)}</td><td>${statusBadge(e.status)}</td>` +
+          `<td><span class="queue-count">${e.queue.length}</span></td></tr>`).join('') +
+        '</tbody></table></div>').join('')
+        : '<p class="empty">暂无员工</p>';
+    }
+
+    async function loadMessages() {
+      const who = document.getElementById('msgWho').value.trim();
+      if (!who) { alert('请输入员工 id'); return; }
+      const data = await (await fetch(`/api/messages?who=${encodeURIComponent(who)}`)).json();
+      const row = m => `<tr><td>${esc(m.id)}</td><td>${esc(m.from)} → ${esc(m.to)}` +
+        (m.task_id ? `<div class="msg-meta">任务 ${esc(m.task_id)}</div>` : '') + `</td><td>${esc(m.content)}</td></tr>`;
+      document.querySelector('#msgInbox tbody').innerHTML = data.inbox.length
+        ? data.inbox.map(row).join('') : '<tr><td colspan="3" class="empty">收件箱为空</td></tr>';
+      document.querySelector('#msgSent tbody').innerHTML = data.sent.length
+        ? data.sent.map(row).join('') : '<tr><td colspan="3" class="empty">发件箱为空</td></tr>';
+    }
+
+    async function loadQueue() {
+      const who = document.getElementById('queueWho').value.trim();
+      if (!who) { alert('请输入员工 id'); return; }
+      let data;
+      try {
+        data = await (await fetch(`/api/queue?who=${encodeURIComponent(who)}`)).json();
+      } catch (e) {
+        alert('查询失败：' + e.message); return;
+      }
+      document.querySelector('#queueTasks tbody').innerHTML = data.length
+        ? data.map(q => `<tr><td>${esc(q.id)}</td><td>${esc(q.title)}</td><td>${esc(q.state)}</td></tr>`).join('')
+        : '<tr><td colspan="3" class="empty">队列为空</td></tr>';
     }
 
     async function loadHumanTasks() {
