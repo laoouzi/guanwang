@@ -574,7 +574,7 @@ TOOLS: dict[str, Tool] = {
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_guard_tools -v`
-Expected: PASS（9 tests OK）
+Expected: PASS（8 tests OK）
 
 - [ ] **Step 5: Commit**
 
@@ -727,7 +727,7 @@ class ApprovalQueue:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_approval_queue -v`
-Expected: PASS（8 tests OK）
+Expected: PASS（7 tests OK）
 
 - [ ] **Step 5: Commit**
 
@@ -931,7 +931,7 @@ def check_stall(task: Task, threshold_sec: int = 180) -> bool:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_dispatcher_scheduler -v`
-Expected: PASS（6 tests OK）
+Expected: PASS（5 tests OK）
 
 - [ ] **Step 5: Commit**
 
@@ -973,17 +973,19 @@ def make_gateway():
 def make_employees():
     return {
         "receptionist": Employee(id="receptionist", name="小助",
+                                 model_config={"provider": "receptionist"},
                                  permissions={"autonomy_level": "supervised", "collaboration": []}),
-        "pm": Employee(id="pm", name="老谋"),
-        "reviewer": Employee(id="reviewer", name="严审"),
-        "dev": Employee(id="dev", name="阿码", capabilities={"tools": ["file_rw"]}),
+        "pm": Employee(id="pm", name="老谋", model_config={"provider": "pm"}),
+        "reviewer": Employee(id="reviewer", name="严审", model_config={"provider": "reviewer"}),
+        "dev": Employee(id="dev", name="阿码", model_config={"provider": "dev"},
+                        capabilities={"tools": ["file_rw"]}),
     }
 
 
 class TestRunner(unittest.TestCase):
     def test_run_returns_content(self):
         r = Runner(make_gateway())
-        emp = Employee(id="dev", name="阿码")
+        emp = Employee(id="dev", name="阿码", model_config={"provider": "dev"})
         out = r.run(emp, Task(id="T-1", title="x"))
         self.assertIn("[dev]", out)
 
