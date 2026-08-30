@@ -8,6 +8,7 @@ from typing import Any
 class Employee:
     id: str
     name: str
+    kind: str = "ai"                     # ai / human（人类员工入部门树，与 AI 同组织协作）
     title: str = ""
     department: str = ""
     reports_to: str = ""
@@ -47,6 +48,7 @@ class Employee:
         return {
             "id": self.id,
             "name": self.name,
+            "kind": self.kind,
             "title": self.title,
             "department": self.department,
             "reports_to": self.reports_to,
@@ -64,7 +66,7 @@ class Employee:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Employee":
-        e = cls(id=d["id"], name=d["name"])
+        e = cls(id=d["id"], name=d["name"], kind=d.get("kind", "ai"))
         for k in ("title", "department", "reports_to", "source", "status", "hired_at"):
             if k in d:
                 setattr(e, k, d[k])

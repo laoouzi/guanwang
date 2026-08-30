@@ -27,6 +27,23 @@ class TestEmployeeFull(unittest.TestCase):
         self.assertEqual(e.memory["experiences"], [])
         self.assertEqual(e.permissions["autonomy_level"], "supervised")
 
+    def test_human_employee_in_department(self):
+        # 人类员工作为 kind=human 的员工进入部门树，与 AI 员工同组织协作
+        h = Employee(id="emp-chengong", name="陈工", kind="human",
+                     title="技术面试官", department="dev_dept")
+        d = h.to_dict()
+        self.assertEqual(d["kind"], "human")
+        h2 = Employee.from_dict(d)
+        self.assertEqual(h2.kind, "human")
+        self.assertEqual(h2.department, "dev_dept")
+
+    def test_default_kind_is_ai(self):
+        e = Employee(id="x", name="y")
+        self.assertEqual(e.kind, "ai")
+        # 旧数据（无 kind 字段）回读默认为 ai，向后兼容
+        e2 = Employee.from_dict({"id": "x", "name": "y"})
+        self.assertEqual(e2.kind, "ai")
+
 
 if __name__ == "__main__":
     unittest.main()
