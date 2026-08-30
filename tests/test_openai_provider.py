@@ -120,6 +120,7 @@ class TestRegisterFromEnv(unittest.TestCase):
             "LAOBAN_DEEPSEEK_API_KEY": "sk-ds",
             "LAOBAN_DASHSCOPE_API_KEY": "sk-qwen",
             "LAOBAN_OPENAI_API_KEY": "sk-oai",
+            "LAOBAN_MOONSHOT_API_KEY": "sk-kimi",
             "LAOBAN_OLLAMA_BASE_URL": "http://127.0.0.1:11434/v1",
         }
         for k, v in env.items():
@@ -128,7 +129,7 @@ class TestRegisterFromEnv(unittest.TestCase):
         try:
             gw = LLMGateway()
             registered = register_from_env(gw)
-            self.assertEqual(set(registered), {"deepseek", "qwen", "openai", "ollama"})
+            self.assertEqual(set(registered), {"deepseek", "qwen", "openai", "kimi", "ollama"})
             for name in registered:
                 self.assertIn(name, gw._providers)
         finally:
@@ -144,7 +145,8 @@ class TestRegisterFromEnv(unittest.TestCase):
         from laoban.llm.openai_compatible import register_from_env
 
         keys = ["LAOBAN_DEEPSEEK_API_KEY", "LAOBAN_DASHSCOPE_API_KEY",
-                "LAOBAN_OPENAI_API_KEY", "LAOBAN_OLLAMA_BASE_URL"]
+                "LAOBAN_OPENAI_API_KEY", "LAOBAN_MOONSHOT_API_KEY",
+                "LAOBAN_OLLAMA_BASE_URL"]
         saved = {k: os.environ.get(k) for k in keys}
         for k in keys:
             os.environ.pop(k, None)

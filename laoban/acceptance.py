@@ -40,10 +40,22 @@ DEV_TASK = {
     "category": "dev",
     "title": "写一个 Python 函数：输入整数列表，返回奇数之和",
     "instructions": (
-        "在 workspace 内生成：\n"
-        "  - odd_sum.py：实现 odd_sum(numbers: list[int]) -> int\n"
-        "  - test_odd_sum.py：写 5+ 条单元测试（包含空列表、全偶数、含 0、含负数、混合）\n"
-        "产出要能被 pytest 执行；判定以 `python -m unittest test_odd_sum` 全绿为准。"
+        "在 workspace 内生成两个文件，输出格式【严格遵守】：每个文件用一个代码围栏，"
+        "围栏起始行必须写文件名，如 ```python odd_sum.py 然后换行写代码。\n\n"
+        "文件 1：odd_sum.py，实现函数 odd_sum(numbers: list[int]) -> int\n"
+        "（注意：函数名必须是 odd_sum）\n"
+        "文件 2：test_odd_sum.py，用 unittest 写 5 条以上测试"
+        "（空列表、全偶数、含 0、含负数、混合），import 用 from odd_sum import odd_sum\n\n"
+        "示例格式：\n"
+        "```python odd_sum.py\n"
+        "def odd_sum(numbers):\n"
+        "    ...\n"
+        "```\n"
+        "```python test_odd_sum.py\n"
+        "import unittest\n"
+        "from odd_sum import odd_sum\n"
+        "```\n"
+        "判定以 `python -m unittest test_odd_sum` 全绿为准。"
     ),
 }
 
@@ -52,9 +64,15 @@ DOC_TASK = {
     "category": "doc",
     "title": "写一份《Python 奇数求和模块技术文档》",
     "instructions": (
-        "生成 Markdown 文件 doc.md，必须包含以下 4 个一级章节：\n"
-        "  # 背景 / # 方案 / # 风险 / # 下一步\n"
-        "每章节至少 30 字。"
+        "生成文件 doc.md，输出格式【严格遵守】：一个代码围栏，起始行写 "
+        "```markdown doc.md 然后换行写正文。\n\n"
+        "文档必须包含以下 4 个一级章节标题（# 背景 / # 方案 / # 风险 / # 下一步），"
+        "每章节至少 30 字。\n\n"
+        "示例格式：\n"
+        "```markdown doc.md\n"
+        "# 背景\n"
+        "（正文）\n"
+        "```\n"
     ),
     "required_sections": ["背景", "方案", "风险", "下一步"],
 }
@@ -64,12 +82,14 @@ DATA_TASK = {
     "category": "data",
     "title": "统计 10 位员工的月度绩效分",
     "instructions": (
-        "1) 生成 data.csv（UTF-8, 逗号分隔）：\n"
-        "   表头 emp_id,name,month,score；10 条员工记录，score 为整数 1-100 随机；\n"
-        "2) 生成 summary.json：\n"
-        "   {\"count\": 10, \"total_score\": <csv 第 4 列求和>, "
-        "\"avg_score\": <求和/count>, \"max_score\": <最大值>, \"min_score\": <最小值>}；\n"
-        "   数值偏差不得 > 0.5。"
+        "生成两个文件，输出格式【严格遵守】：每个文件一个代码围栏，"
+        "起始行写文件名。\n\n"
+        "文件 1：```csv data.csv —— UTF-8、逗号分隔、表头 emp_id,name,month,score，"
+        "10 条记录，score 为 1-100 整数\n"
+        "文件 2：```json summary.json —— 统计值必须与你生成的 CSV 数据核对一致：\n"
+        "  {\"count\": 10, \"total_score\": <求和>, \"avg_score\": <求和/10>, "
+        "\"max_score\": <最大>, \"min_score\": <最小>}\n"
+        "（数值是数字类型，不是字符串；偏差不得 > 0.5）\n"
     ),
 }
 
@@ -226,8 +246,8 @@ def run_acceptance(gateway: LLMGateway, reviewer: Reviewer | None = None,
     results: list[dict] = []
     for task_def in suite:
         t0 = time.time()
-        task = Task(id=task_def["id"], title=task_def["title"])
-        task.progress_log.append({"instruction": task_def["instructions"]})
+        task = Task(id=task_def["id"], title=task_def["title"],
+                    instruction=task_def["instructions"])
 
         # 流水线
         for state, actor in [(TRIAGE, "receptionist"), (PLANNING, "pm"),
@@ -242,7 +262,7 @@ def run_acceptance(gateway: LLMGateway, reviewer: Reviewer | None = None,
                 runner = Runner(gateway)
                 deliverable = runner.run(staff["worker"], task)
                 task.progress_log.append({"deliverable": deliverable})
-                _write_deliverables(task_def, workspace, deliverable)
+                llm_generated = _write_deliverables(task_def, workspace, deliverable)
         store.save_task(task)
 
         # 判定
@@ -261,26 +281,27 @@ def run_acceptance(gateway: LLMGateway, reviewer: Reviewer | None = None,
             "reason": verdict.reason,
             "review_passed": review_decision.approved,
             "review_reason": review_decision.reason,
+            "llm_generated": llm_generated,
             "duration_sec": round(time.time() - t0, 2),
         })
     return results
 
 
-def _write_deliverables(task_def: dict, workspace: Path, deliverable: str) -> None:
-    """把 deliverable 解析成磁盘文件（支持 "```语言 文件路径\n...\n```" 代码块围栏；
-    若 LLM 没按围栏输出，按类别兜底生成合法文件，保证 D2 判定可执行。
+def _write_deliverables(task_def: dict, workspace: Path, deliverable: str) -> bool:
+    """把 deliverable 解析成磁盘文件（支持 "```语言 文件路径\n...\n```" 代码块围栏）。
 
-    ⚠️ 兜底只在演示/MockLLM 路径下有效；真实 LLM 必须按 instruction 输出。
+    返回 True = 文件来自 LLM 围栏产出；False = LLM 未按格式输出，走了兜底生成。
+
+    ⚠️ 兜底只在演示/MockLLM 路径下有效；真实 LLM 验收若 llm_generated=False，
+    判定"通过"不代表真实模型能力（文件是兜底生成的），必须如实报告。
     """
     # 围栏解析
     fences = re.findall(r"```(?:\w+)\s+(\S+)\n(.*?)```", deliverable, flags=re.S)
-    written = False
     for fname, body in fences:
         p = workspace / Path(fname).name  # 只取文件名，避免路径穿越
         p.write_text(body, encoding="utf-8")
-        written = True
-    if written:
-        return
+    if fences:
+        return True
 
     # 兜底生成（演示模式）
     cat = task_def["category"]
@@ -328,3 +349,4 @@ def _write_deliverables(task_def: dict, workspace: Path, deliverable: str) -> No
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+    return False

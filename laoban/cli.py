@@ -219,8 +219,9 @@ def main(argv: list[str] | None = None) -> int:
         passed = sum(1 for r in results if r["passed"])
         for r in results:
             mark = "✅" if r["passed"] else "❌"
+            gen = "LLM 产出" if r.get("llm_generated") else "⚠️ 兜底生成（非 LLM 真实产出）"
             print(f"{mark} [{r['category']}] {r['task_id']} — {r['reason']}"
-                  f"（评审：{'通过' if r['review_passed'] else '封驳'}）")
+                  f"（评审：{'通过' if r['review_passed'] else '封驳'}；{gen}）")
         print(f"\n验收结果：{passed}/{len(results)} 通过"
               + (" ✅ 达到 D2 目标（≥ 2/3）" if passed >= 2 and len(results) >= 2 else ""))
         return 0 if passed >= 2 or len(results) < 2 else 2

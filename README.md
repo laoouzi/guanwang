@@ -69,6 +69,7 @@ laoban acceptance run
 export LAOBAN_DEEPSEEK_API_KEY="sk-..."        # DeepSeek
 export LAOBAN_DASHSCOPE_API_KEY="sk-..."       # 通义千问
 export LAOBAN_OPENAI_API_KEY="sk-..."          # OpenAI
+export LAOBAN_MOONSHOT_API_KEY="sk-..."        # Kimi（kimi-k2.6）
 export LAOBAN_OLLAMA_BASE_URL="http://127.0.0.1:11434/v1"   # Ollama（本地）
 
 laoban acceptance run                          # 自动切换真实 LLM 跑 D2 验收

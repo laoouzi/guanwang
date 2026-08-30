@@ -4,12 +4,14 @@
   - DeepSeek     https://api.deepseek.com/v1
   - 通义千问      https://dashscope.aliyuncs.com/compatible-mode/v1
   - OpenAI       https://api.openai.com/v1
+  - Kimi/Moonshot https://api.moonshot.cn/v1（kimi-k2.6 等）
   - Ollama       http://127.0.0.1:11434/v1（本地，无需 Key）
 
 环境变量自动发现（register_from_env）：
   LAOBAN_DEEPSEEK_API_KEY    → provider "deepseek"
   LAOBAN_DASHSCOPE_API_KEY   → provider "qwen"
   LAOBAN_OPENAI_API_KEY      → provider "openai"
+  LAOBAN_MOONSHOT_API_KEY    → provider "kimi"
   LAOBAN_OLLAMA_BASE_URL     → provider "ollama"
 """
 from __future__ import annotations
@@ -33,6 +35,8 @@ _ENV_MAP: dict[str, tuple[str, str, str, bool]] = {
         "qwen-plus", True),
     "LAOBAN_OPENAI_API_KEY": (
         "openai", "https://api.openai.com/v1", "gpt-4o-mini", True),
+    "LAOBAN_MOONSHOT_API_KEY": (
+        "kimi", "https://api.moonshot.cn/v1", "kimi-k2.6", True),
     "LAOBAN_OLLAMA_BASE_URL": (
         "ollama", "http://127.0.0.1:11434/v1", "qwen2.5:7b", False),
 }
