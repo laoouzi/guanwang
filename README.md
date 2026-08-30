@@ -36,6 +36,7 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 | 员工生命周期 | 招聘 → 上岗 → 停职（suspended，可恢复）→ 解雇（terminated，**不可逆**）；非 active 员工被派单守卫拦截 |
 | 工位任务队列 | `workspace.queue`：`task assign` 派发入队、完成出队，员工视角的任务清单 |
 | 点对点消息 | Messenger：员工间消息（`collaboration` 空白名单=组织内默认开放；非空=白名单收紧） |
+| AI 自主协作 | AI 员工在 prompt 中看到**组织通讯录**（职责/能力/忙闲/状态），通过 `[TOOL]` 协议调用 `send_message` / `delegate_task` 工具主动找人；权限拒绝以 ❌ 反馈回 LLM 重试 |
 | 任务状态机 | pending → triage → planning → review ⇄ 驳回(≤3 轮) → assigned → doing ⇄ waiting_human → reporting → done |
 | 权限矩阵 | 协作权限 / 工具权限 / 支出限额 / 自主等级（supervised/semi/full） |
 | 审批队列 | 高危操作 + 支出授权 + 编制申请统一审批单，容量/时间联合触发批量处理 |
@@ -90,6 +91,21 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 - 双轨招聘编制申请的 `role` 按**岗位 id 或 title** 命中模板时，新员工自动套用该岗位的
   模型/权限/职责（`kind` 以申请单为准）；
 - 配置查找顺序：显式 `--file` → `{root}/org.json` → 内置默认模板。
+
+### AI 自主协作（Runner 工具循环）
+
+`Runner(gateway, store=...)` 注入 store 后，AI 员工的执行循环变为：
+
+1. **看**：system prompt 携带组织通讯录（`render_directory`：`[AI/人类] id 姓名 · 职务 · 部门 · 职责 · 工具 · 在办N · 停职标注`，解雇员工不可见）；
+2. **选**：LLM 输出 `[TOOL]` 块发起协作——`send_message`（发消息）或 `delegate_task`（派子任务：人类→待办收件箱且结果回传发起人；AI→新任务 born-assigned 入其工位队列）；
+3. **守**：权限守卫复用制度管道（`can_message` 白名单、`can_assign_human_tasks`、在职校验）；拒绝不抛异常，以 `❌` 反馈回 LLM 换人重试（最多 3 轮）；
+4. **审**：所有协作动作以 `[协作动作]` 附在产出尾部，可审计。
+
+```
+[TOOL] delegate_task
+{"assignee": "emp-chen", "title": "核查异常值", "instruction": "核对后回传"}
+[/TOOL]
+```
 
 ### 员工档案字段（`Employee` dataclass）
 

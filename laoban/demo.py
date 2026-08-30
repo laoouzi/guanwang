@@ -16,6 +16,7 @@ from .bootstrap import bootstrap_org
 from .org import load_org, instantiate, iter_roles
 from .llm.gateway import LLMGateway
 from .llm.mock import MockLLM
+from .runner.runner import Runner
 
 
 def run_demo() -> int:
@@ -70,17 +71,30 @@ def run_demo() -> int:
             enqueue(store, "dev", task.id)
             print(f"    → 任务入队 dev 工位（当前队列 {queue_of(store, 'dev')}）")
 
-    # DOING：AI 执行中发现超出能力 → 转人类待办
+    # DOING：AI 执行中通过工具循环自主决定找人类同事配合
     advance(task, DOING, actor="dev")
     store.save_task(task)
     ledger.record_step("dev")
     print(f"    {task.state:<14} ← dev 执行中")
-    ht = inbox.create(task_id=task.id, title="配合 AI 核查三份样本数据的异常值",
-                      assignee="emp-chen", due_date=date.today().isoformat())
-    advance(task, WAITING_HUMAN, actor="dev", remark=f"超出 AI 能力，转人类待办 {ht.id}")
+    print("    ─ dev 的视野：组织通讯录（含人类同事）+ 协作工具 [TOOL] 协议")
+    gw.register_mock("dev", MockLLM(responses=[
+        "这批数据需要人工抽查异常值，通讯录里陈工（emp-chen）是数据核查员，派给他：\n\n"
+        "[TOOL] delegate_task\n"
+        '{"assignee": "emp-chen", "title": "配合 AI 核查三份样本数据的异常值", '
+        '"instruction": "核对后回传结论", "due": "' + date.today().isoformat() + '"}\n'
+        "[/TOOL]\n",
+        "clean_data() 初版完成，等陈工的人工抽查结论回来后定稿。",
+    ]))
+    runner = Runner(gw, store=store)
+    output = runner.run(store.load_employee("dev"), task)
+    for line in output.splitlines():
+        if line.startswith("- "):
+            print(f"    ─ dev 的协作动作：{line}")
+    ht = [h for h in inbox.list_pending() if h.assignee == "emp-chen"][-1]
+    advance(task, WAITING_HUMAN, actor="dev", remark=f"AI 自主转人类待办 {ht.id}")
     store.save_task(task)
     ledger.record_human_intervention("dev", "human_task")
-    print(f"    {task.state:<14} ← dev 派发人类待办给 陈工")
+    print(f"    {task.state:<14} ← dev 自主派发人类待办 {ht.id} 给 陈工")
 
     # 人类员工当日任务清单
     print(f"\n【4】陈工的今日任务清单（{date.today()}）：")
