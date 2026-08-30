@@ -67,6 +67,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     demo = sub.add_parser("demo", help="演示模式（MockLLM，无需 API Key）")
 
+    acc = sub.add_parser("acceptance", help="D2 标准验收套件（3 类任务自动判定）")
+    acc_sub = acc.add_subparsers(dest="acc_command", required=True)
+    acc_run = acc_sub.add_parser("run", help="运行验收套件")
+    acc_run.add_argument("--root", default=".laoban")
+    acc_run.add_argument("--suite", default="standard", help="standard | 任务 ID 逗号分隔")
+
     return p
 
 
@@ -158,5 +164,26 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "demo":
         from .demo import run_demo
         return run_demo()
+
+    if cmd == "acceptance":
+        from .acceptance import run_acceptance, STANDARD_SUITE
+        from .llm.gateway import LLMGateway
+        from .llm.mock import MockLLM
+        gw = LLMGateway()
+        for pid in ("receptionist", "pm", "reviewer", "worker"):
+            gw.register_mock(pid, MockLLM(responses=[f"[{pid}] 验收产出", "[准奏] OK"]))
+        suite = STANDARD_SUITE
+        if args.suite != "standard":
+            wanted = {x.strip() for x in args.suite.split(",") if x.strip()}
+            suite = tuple(t for t in STANDARD_SUITE if t["id"] in wanted)
+        results = run_acceptance(gw, suite=suite, root_dir=args.root)
+        passed = sum(1 for r in results if r["passed"])
+        for r in results:
+            mark = "✅" if r["passed"] else "❌"
+            print(f"{mark} [{r['category']}] {r['task_id']} — {r['reason']}"
+                  f"（评审：{'通过' if r['review_passed'] else '封驳'}）")
+        print(f"\n验收结果：{passed}/{len(results)} 通过"
+              + (" ✅ 达到 D2 目标（≥ 2/3）" if passed >= 2 and len(results) >= 2 else ""))
+        return 0 if passed >= 2 or len(results) < 2 else 2
 
     return 1

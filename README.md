@@ -33,8 +33,76 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 ## 架构
 
 - **制度内核**（`laoban/core/`）：任务状态机、权限矩阵、员工档案、绩效账本、人类收件箱、经验回写
-- **执行引擎**（`laoban/runner/`、`laoban/llm/`）：多供应商 LLM 网关（DeepSeek/千问/GPT/Ollama，OpenAI 兼容）、工具循环、安全 Guard、评审员（准奏/封驳）、审批队列
+- **执行引擎**（`laoban/runner/`、`laoban/llm/`）：多供应商 LLM 网关（DeepSeek/千问/GPT/Ollama，OpenAI 兼容）、工具循环、安全 Guard、评审员（准奏/封驳）、审批队列、审批日志
 - **交互层**（`laoban/cli.py`、`laoban/dashboard/`）：CLI 完整子命令 + Web 看板（标准库 HTTP，零第三方依赖）
+
+## 配置参考
+
+### 员工档案字段（`Employee` dataclass）
+
+| 字段 | 类型 | 说明 | 典型值 |
+|---|---|---|---|
+| `id` / `name` | str | 员工标识与显示名 | `emp-chen`, `陈工` |
+| `kind` | `ai` / `human` | 身份类别；人类员工同样入部门树 | `ai` |
+| `title` / `department` / `reports_to` | str | 岗位、部门、汇报上级 | `开发工程师`, `dev_dept` |
+| `source` | `founder` / `template` / `hired` / `cloned` | 入职来源 | `hired` |
+| `status` | `active` / `suspended` / `terminated` | 在职状态 | `active` |
+| `job_description` | dict | 核心职能：`mission` / `duties[]` / `workflow_rules[]` / `escalation` | - |
+| `performance_goals` | dict | 绩效目标：`max_concurrent` / `budget_daily_cost` / `quality_bar` | - |
+| `capabilities` | dict | 工作能力：`tools[]` / `skills[]` / `model_fit[]` | `{"tools": ["file_rw"]}` |
+| `model_config` | dict | LLM 配置：`provider` / `model` / `temperature` | `{"provider":"deepseek","model":"deepseek-chat"}` |
+| `permissions` | dict | 权限矩阵：`collaboration[]` / `can_assign_human_tasks` / `spending_limit_per_task` / `autonomy_level` | - |
+| `permissions.autonomy_level` | `supervised` / `semi` / `full` | 自主等级：supervised 全审批 / semi 放行 low / full 放行 low+medium | `supervised` |
+| `memory` | dict | 轻量记忆：`experiences[]` / `notes[]`（由验收评分回写） | - |
+| `workspace` | dict | 工位：`dir` / `queue[]` / `context{}` | - |
+
+### LLM 网关（LLMGateway）
+
+```python
+from laoban.llm.gateway import LLMGateway
+from laoban.llm.mock import MockLLM
+
+gw = LLMGateway()
+# 演示模式
+gw.register_mock("reviewer", MockLLM(responses=["[准奏] OK"]))
+# 真实模式：OpenAI 兼容协议，配置 env 变量后接入（v0.1 已留 provider 路由接口）
+```
+
+路由原则：`chat_for_employee(model_config)` → 用 `model_config["provider"]` 查找已注册的实现，不依赖员工 ID。
+
+### 权限矩阵 · 分级放行（`should_approve`）
+
+| 风险 / 自主 | supervised | semi | full |
+|---|---|---|---|
+| `high`（命令、越界写文件）| ✅ 审批 | ✅ 审批 | ✅ **审批（永远）** |
+| `medium`（非白名单域名）| ✅ 审批 | ✅ 审批 | 放行 |
+| `low`（workspaces 内读写）| ✅ 审批 | 放行 | 放行 |
+
+高危操作经 `request_and_maybe_block()` 统一入口，100% 落盘到 `approvals/`（D6 硬保障）。
+
+### 验收套件（D2）
+
+```bash
+laoban acceptance run --root /tmp/laoban-acc
+# 分类：
+#   ACCEPT-DEV-001  开发类（odd_sum.py + 单元测试 5 条 → unittest 全绿）
+#   ACCEPT-DOC-001  文档类（doc.md 四章节齐全且每章 ≥30 字）
+#   ACCEPT-DATA-001 数据类（data.csv 10 条 × summary.json 五指标误差 ≤0.5）
+```
+
+验收 runner 除自动判定外，还会调用评审员（`Reviewer`）做 LLM 检查单复核，双层保障。
+
+### 目录结构
+
+```
+.laoban/                      # laoban init 生成
+├── tasks/<id>.json           # 任务档案（含 flow_log + progress_log）
+├── employees/<id>.json       # 员工档案
+├── human_tasks/<id>.json     # 人类待办（AI 派发的配合任务 / 自建 / 老板指派）
+├── headcount_requests/       # 编制申请（双轨招聘）
+├── approvals/<id>.json       # 审批日志（高危必记）
+└── workspaces/<emp_id>/      # 员工工位产出物
+```
 
 ## 测试
 
