@@ -51,10 +51,15 @@ def _build_parser() -> argparse.ArgumentParser:
     ta.add_argument("--due", default="", help="截止日期 YYYY-MM-DD（空=不限期）")
     ta.add_argument("--source", default="ai_delegated",
                     choices=["ai_delegated", "self", "boss"])
-    tc = todo_sub.add_parser("done", help="完成人类待办")
+    ta.add_argument("--from", dest="from_id", default="boss",
+                    help="发起人 id（完成结果回传给该员工，人→人闭环）")
+    tc = todo_sub.add_parser("done", help="完成人类待办（结果自动回传发起人）")
     tc.add_argument("--root", default=".laoban")
     tc.add_argument("--id", required=True)
     tc.add_argument("--result", default="")
+    tr = todo_sub.add_parser("results", help="查看我发起的任务已回传的结果")
+    tr.add_argument("--root", default=".laoban")
+    tr.add_argument("--who", required=True, help="发起人员工 id")
 
     today = sub.add_parser("today", help="人类员工当日任务清单")
     today.add_argument("--root", default=".laoban")
@@ -129,12 +134,25 @@ def main(argv: list[str] | None = None) -> int:
         inbox = HumanInbox(st)
         if args.todo_command == "add":
             ht = inbox.create(task_id=args.task_id, title=args.title,
-                              assignee=args.assignee, due_date=args.due, source=args.source)
-            print(f"人类待办已创建：{ht.id} {ht.title} → {ht.assignee}")
+                              assignee=args.assignee, due_date=args.due, source=args.source,
+                              created_by=args.from_id)
+            print(f"人类待办已创建：{ht.id} {ht.title} → {ht.assignee}"
+                  f"（发起人 {ht.created_by}，完成后结果回传）")
             return 0
         if args.todo_command == "done":
             inbox.complete(args.id, result=args.result)
             print(f"人类待办已完成：{args.id}")
+            return 0
+        if args.todo_command == "results":
+            rs = inbox.results_for(args.who)
+            if not rs:
+                print(f"{args.who} 暂无回传结果")
+                return 0
+            print(f"📩 {args.who} 收到的回传结果（{len(rs)} 条）：")
+            for ht in rs:
+                print(f"  {ht.id} {ht.title} ← {ht.assignee}")
+                if ht.result:
+                    print(f"    结果：{ht.result}")
             return 0
 
     if cmd == "today":
@@ -142,6 +160,10 @@ def main(argv: list[str] | None = None) -> int:
         inbox = HumanInbox(st)
         date = args.date or datetime.date.today().isoformat()
         mine = inbox.daily_list(assignee=args.who, date=date)
+        results = inbox.results_for(args.who)
+        if results:
+            print(f"📩 {args.who} 有 {len(results)} 条回传结果待查看"
+                  f"（laoban todo results --who {args.who}）")
         if not mine:
             print(f"{args.who} 在 {date} 没有待办")
             return 0

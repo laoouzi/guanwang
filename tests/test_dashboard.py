@@ -21,9 +21,15 @@ class TestDashboard(unittest.TestCase):
         store.save_employee(Employee(id="dev", name="阿码"))
         store.save_employee(Employee(id="emp-陈工", name="陈工", kind="human",
                                      department="dev_dept"))
+        store.save_employee(Employee(id="emp-小李", name="小李", kind="human",
+                                     department="dev_dept"))
         inbox = HumanInbox(store)
         inbox.create(task_id="T-1", title="配合 AI 核查数据", assignee="emp-陈工",
                      due_date="2026-08-30")
+        # 人→人闭环：陈工派活给小李，小李完成后结果回传
+        ht = inbox.create(task_id="T-1", title="复核异常值清单", assignee="emp-小李",
+                          source="self", created_by="emp-陈工")
+        inbox.complete(ht.id, result="12 条异常全部人工复核确认")
         cls.server = DashboardServer(store, port=0)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -61,6 +67,22 @@ class TestDashboard(unittest.TestCase):
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["title"], "配合 AI 核查数据")
             self.assertEqual(data[0]["source"], "ai_delegated")
+
+    def test_api_human_results(self):
+        # 人→人闭环：陈工查自己发起任务的回传结果
+        who = urllib.parse.quote("emp-陈工")
+        with urllib.request.urlopen(f"{self.base}/api/human-results?who={who}") as r:
+            data = json.loads(r.read())
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["assignee"], "emp-小李")
+        self.assertIn("12 条", data[0]["result"])
+        self.assertEqual(data[0]["created_by"], "emp-陈工")
+
+    def test_api_human_results_empty_for_other(self):
+        who = urllib.parse.quote("emp-小李")
+        with urllib.request.urlopen(f"{self.base}/api/human-results?who={who}") as r:
+            data = json.loads(r.read())
+        self.assertEqual(data, [])
 
 
 if __name__ == "__main__":

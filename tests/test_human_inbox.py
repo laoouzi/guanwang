@@ -78,5 +78,48 @@ class TestDailyList(unittest.TestCase):
         self.assertEqual(mine[0].source, "self")
 
 
+class TestResultsFor(unittest.TestCase):
+    """人→人任务闭环：结果返回发起人。"""
+
+    def setUp(self):
+        self.store = JsonStore(tempfile.mkdtemp())
+        self.inbox = HumanInbox(self.store)
+
+    def test_result_returned_to_initiator(self):
+        # 陈工派活给小李，小李完成后结果回到陈工
+        ht = self.inbox.create(task_id="T-9", title="复核异常值", assignee="emp-xiaoli",
+                               source="self", created_by="emp-chen")
+        self.inbox.complete(ht.id, result="12 条已确认")
+        results = self.inbox.results_for("emp-chen")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].result, "12 条已确认")
+        self.assertEqual(results[0].assignee, "emp-xiaoli")
+
+    def test_pending_not_in_results(self):
+        # 未完成的不进回传列表
+        self.inbox.create(task_id="T-9", title="复核", assignee="emp-xiaoli",
+                          source="self", created_by="emp-chen")
+        self.assertEqual(self.inbox.results_for("emp-chen"), [])
+
+    def test_only_my_initiated(self):
+        # 别人派发的完成结果不属于我
+        ht = self.inbox.create(task_id="T-9", title="小李的活", assignee="emp-xiaoli",
+                               source="boss", created_by="boss")
+        self.inbox.complete(ht.id, result="done")
+        self.assertEqual(self.inbox.results_for("emp-chen"), [])
+        self.assertEqual(len(self.inbox.results_for("boss")), 1)
+
+    def test_created_by_roundtrip(self):
+        ht = HumanTask(id="HT-1", task_id="T-1", title="x", assignee="y",
+                       created_by="emp-chen")
+        ht2 = HumanTask.from_dict(ht.to_dict())
+        self.assertEqual(ht2.created_by, "emp-chen")
+
+    def test_default_created_by_is_boss(self):
+        # 旧调用不带 created_by，默认 boss（v0.1 老板是默认发起人）
+        ht = self.inbox.create(task_id="T-1", title="x", assignee="y")
+        self.assertEqual(ht.created_by, "boss")
+
+
 if __name__ == "__main__":
     unittest.main()

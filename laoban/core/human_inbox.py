@@ -18,6 +18,7 @@ class HumanTask:
     result: str = ""
     due_date: str = ""            # YYYY-MM-DD，空 = 不限期（随时可见）
     source: str = "ai_delegated"  # ai_delegated（AI 派发配合）/ self / boss
+    created_by: str = "boss"      # 发起人 id：完成结果回传给谁（人→人闭环）
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -25,6 +26,7 @@ class HumanTask:
             "assignee": self.assignee, "deliverable_format": self.deliverable_format,
             "status": self.status, "result": self.result,
             "due_date": self.due_date, "source": self.source,
+            "created_by": self.created_by,
         }
 
     @classmethod
@@ -34,6 +36,7 @@ class HumanTask:
             assignee=d.get("assignee", ""), deliverable_format=d.get("deliverable_format", ""),
             status=d.get("status", "pending"), result=d.get("result", ""),
             due_date=d.get("due_date", ""), source=d.get("source", "ai_delegated"),
+            created_by=d.get("created_by", "boss"),
         )
 
 
@@ -53,10 +56,11 @@ class HumanInbox:
         return self.dir / f"{task_id}.json"
 
     def create(self, task_id: str, title: str, assignee: str, deliverable_format: str = "",
-               due_date: str = "", source: str = "ai_delegated") -> HumanTask:
+               due_date: str = "", source: str = "ai_delegated",
+               created_by: str = "boss") -> HumanTask:
         ht = HumanTask(id=f"HT-{uuid.uuid4().hex[:6]}", task_id=task_id,
                        title=title, assignee=assignee, deliverable_format=deliverable_format,
-                       due_date=due_date, source=source)
+                       due_date=due_date, source=source, created_by=created_by)
         self.store._atomic_write(self._path(ht.id), ht.to_dict())
         return ht
 
@@ -95,3 +99,18 @@ class HumanInbox:
         ht.status = "completed"
         ht.result = result
         self.store._atomic_write(self._path(task_id), ht.to_dict())
+
+    def results_for(self, requester: str) -> list[HumanTask]:
+        """某发起人已收到的回传结果（人→人闭环的结果返回）。
+
+        规则：created_by == requester 且 status == completed。
+        待办（pending）不出现——那是"还在别人手里的活"，不算回传。
+        """
+        out: list[HumanTask] = []
+        for p in sorted(self.dir.glob("*.json")):
+            d = self.store._read_json(p)
+            if not d:
+                continue
+            if d.get("status") == "completed" and d.get("created_by") == requester:
+                out.append(HumanTask.from_dict(d))
+        return out

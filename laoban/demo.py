@@ -75,6 +75,16 @@ def run_demo() -> int:
     inbox.complete(ht.id, result="发现 12 条异常记录，已标注")
     print("    ✔ 陈工完成待办，流程恢复")
 
+    # 人→人闭环：陈工把复核工作派给同部门的小李，小李完成后结果回传陈工
+    store.save_employee(Employee(id="emp-xiaoli", name="小李", kind="human",
+                                 title="初级核查员", department="dev_dept"))
+    ht2 = inbox.create(task_id=task.id, title="复核 12 条异常记录", assignee="emp-xiaoli",
+                       source="self", created_by="emp-chen")
+    print(f"\n【4.5】人→人派活：陈工 → 小李（{ht2.id}）")
+    inbox.complete(ht2.id, result="12 条异常全部人工复核确认，其中 2 条误报")
+    for r in inbox.results_for("emp-chen"):
+        print(f"    📩 陈工收到回传：{r.title} ← 小李 —— {r.result}")
+
     # 流程收尾
     for state, actor in [(DOING, "emp-chen"), (REPORTING, "dev"), (DONE, "boss")]:
         advance(task, state, actor=actor)

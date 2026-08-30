@@ -13,6 +13,8 @@ laoban hire --name 陈工 --kind human --title 数据核查员 --department dev_
 laoban task submit --title "写一个数据清洗函数"
 laoban todo add --assignee emp-陈工 --title "配合 AI 核查数据" --due 2026-08-30
 laoban today --who emp-陈工          # 人类员工当日任务清单
+laoban todo add --assignee emp-小李 --title "复核异常值" --source self --from emp-陈工
+laoban todo results --who emp-陈工   # 人→人闭环：查看发起任务回传的结果
 laoban dashboard          # Web 看板（127.0.0.1:7891）
 ```
 

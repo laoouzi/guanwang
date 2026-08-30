@@ -33,6 +33,12 @@ class _Handler(BaseHTTPRequestHandler):
             date = q.get("date", [datetime.date.today().isoformat()])[0]
             inbox = HumanInbox(self.store)
             return self._json([ht.to_dict() for ht in inbox.daily_list(assignee=who, date=date)])
+        if u.path == "/api/human-results":
+            # 人→人闭环：查看发起人收到的回传结果
+            q = parse_qs(u.query)
+            who = q.get("who", [""])[0]
+            inbox = HumanInbox(self.store)
+            return self._json([ht.to_dict() for ht in inbox.results_for(who)])
         # 默认返回看板 HTML
         html = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
         body = html.encode()

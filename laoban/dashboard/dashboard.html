@@ -32,9 +32,11 @@
   <h2>人类员工当日任务清单</h2>
   <p>
     <input id="who" placeholder="员工 id，如 emp-陈工" />
-    <button onclick="loadHumanTasks()">查看</button>
+    <button onclick="loadHumanTasks()">查看今日清单</button>
+    <button onclick="loadHumanResults()">查看回传结果</button>
   </p>
   <table id="humanTasks"><thead><tr><th>ID</th><th>标题</th><th>来源</th><th>截止</th><th>状态</th></tr></thead><tbody></tbody></table>
+  <table id="humanResults"><thead><tr><th>ID</th><th>标题</th><th>承接人</th><th>回传结果</th></tr></thead><tbody></tbody></table>
 
   <script>
     const SRC_LABEL = { ai_delegated: 'AI 派发', self: '自建', boss: '老板指派' };
@@ -61,6 +63,17 @@
         `<td class="src-${esc(h.source)}">${esc(SRC_LABEL[h.source] || h.source)}</td>` +
         `<td>${esc(h.due_date || '不限期')}</td><td>${esc(h.status)}</td></tr>`).join('')
         : '<tr><td colspan="5">当日无待办</td></tr>';
+    }
+
+    async function loadHumanResults() {
+      // 人→人闭环：查看该员工发起的任务已回传的结果
+      const who = document.getElementById('who').value.trim();
+      if (!who) { alert('请输入员工 id'); return; }
+      const rs = await (await fetch(`/api/human-results?who=${encodeURIComponent(who)}`)).json();
+      document.querySelector('#humanResults tbody').innerHTML = rs.length ? rs.map(h =>
+        `<tr><td>${esc(h.id)}</td><td>${esc(h.title)}</td><td>${esc(h.assignee)}</td>` +
+        `<td>${esc(h.result || '（空）')}</td></tr>`).join('')
+        : '<tr><td colspan="4">暂无回传结果</td></tr>';
     }
 
     load();
