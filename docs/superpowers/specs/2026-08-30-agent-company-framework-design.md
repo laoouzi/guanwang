@@ -106,7 +106,7 @@ IM 接入 · 多用户登录与完整 RBAC · 计费 · 技能市场 · 复杂 D
 | Guard | 硬规则（黑名单/白名单）+ 检查单；判定操作风险等级 | `check(action)` / `review(plan)` | 规则配置 |
 | Messenger | 员工间点对点消息，先过权限矩阵，全部落审计 | `send(from, to, task_id, text)` | PermissionMatrix, Store |
 | Ledger | 绩效与成本：完成数/耗时/费用/驳回率；预算强制 | `record()` / `stats()` | Store |
-| HumanInbox | 人类待办收件箱：认领、填结果、交还 | `list / complete` | StateMachine |
+| HumanInbox | 人类待办收件箱：认领、填结果、交还；**每日任务清单（按人按天，含 AI 派发配合任务）** | `list / complete` / `daily_list(assignee, date)` | StateMachine |
 | Memory | 员工轻量记忆：经验条目、关键备注；验收评分回写 | `recall(emp_id)` / `record_experience(emp_id, entry)` | Store |
 
 ### 4.2 任务状态机
@@ -231,6 +231,7 @@ IM 接入 · 多用户登录与完整 RBAC · 计费 · 技能市场 · 复杂 D
 ```
 
 - 人 → AI：下达任务 / 审批 / 验收；AI → 人：派发人类待办（结构化：背景+目标+交付物格式+截止提醒）/ 请求授权 / 汇报；
+- **人类员工每日任务清单**：每个 `kind=human` 员工按天看自己的活（`HumanInbox.daily_list(assignee, date)`）——含 AI 派发的配合任务（`source=ai_delegated`）与自己/老板创建的任务（`self/boss`）；逾期未完成的自动留在当天清单，截止日在未来的不提前出现；
 - v0.1 已知妥协：本地运行、无登录鉴权、默认绑定 127.0.0.1 + README 醒目警告。
 
 ### 5.4 启动期「创业团队」模式（Phase 0）
