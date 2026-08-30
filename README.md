@@ -58,16 +58,33 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 
 ### LLM 网关（LLMGateway）
 
-```python
-from laoban.llm.gateway import LLMGateway
-from laoban.llm.mock import MockLLM
+```bash
+# 演示模式（默认，无需 Key）
+laoban demo
+laoban acceptance run
 
-gw = LLMGateway()
-# 演示模式
-gw.register_mock("reviewer", MockLLM(responses=["[准奏] OK"]))
-# 真实模式：OpenAI 兼容协议，配置 env 变量后接入（v0.1 已留 provider 路由接口）
+# 真实模式：设置任一环境变量即可自动发现
+export LAOBAN_DEEPSEEK_API_KEY="sk-..."        # DeepSeek
+export LAOBAN_DASHSCOPE_API_KEY="sk-..."       # 通义千问
+export LAOBAN_OPENAI_API_KEY="sk-..."          # OpenAI
+export LAOBAN_OLLAMA_BASE_URL="http://127.0.0.1:11434/v1"   # Ollama（本地）
+
+laoban acceptance run                          # 自动切换真实 LLM 跑 D2 验收
+laoban acceptance run --provider deepseek      # 多个 Key 时指定用哪个
 ```
 
+```python
+from laoban.llm.gateway import LLMGateway
+from laoban.llm.openai_compatible import register_from_env, OpenAICompatibleProvider
+
+gw = LLMGateway()
+register_from_env(gw)                          # 环境变量自动注册
+# 或手动注册任意 OpenAI 兼容服务（自建网关/vLLM/LM Studio 等）
+gw.register_provider("my-llm", OpenAICompatibleProvider(
+    base_url="http://10.0.0.5:8000/v1", api_key="token", model="Qwen2.5-32B"))
+```
+
+传输层用标准库 `urllib` 实现（零第三方依赖），协议为 OpenAI 兼容 `/chat/completions`；
 路由原则：`chat_for_employee(model_config)` → 用 `model_config["provider"]` 查找已注册的实现，不依赖员工 ID。
 
 ### 权限矩阵 · 分级放行（`should_approve`）

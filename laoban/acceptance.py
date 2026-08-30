@@ -182,8 +182,14 @@ JUDGES: dict[str, Callable[[dict, Path], Verdict]] = {
 
 def run_acceptance(gateway: LLMGateway, reviewer: Reviewer | None = None,
                    suite: tuple | None = None,
-                   root_dir: str | None = None) -> list[dict]:
+                   root_dir: str | None = None,
+                   provider: str | None = None) -> list[dict]:
     """依次执行 3 类验收任务，返回结果列表。
+
+    provider 语义：
+    - None（默认）：员工各自用 model_config 里的 provider 名（MockLLM 演示模式）。
+    - 非 None：全部员工统一路由到该真实 provider（如 "deepseek"），
+      由 register_from_env 自动发现的环境变量注入。
 
     执行流程：标准任务流水线（triage/planning/review/assigned/doing/reporting/done）
     → 产出物落盘到 `workspaces/{emp_id}/` → 自动判定器判定 → DONE 后由评审员再复核。
@@ -195,16 +201,19 @@ def run_acceptance(gateway: LLMGateway, reviewer: Reviewer | None = None,
         root_dir = tempfile.mkdtemp(prefix="laoban-acc-")
     store = JsonStore(root_dir)
 
+    def _cfg(pid: str) -> dict:
+        return {"provider": provider or pid, "model": "mock" if provider is None else provider}
+
     # 流水线员工
     staff = {
         "receptionist": Employee(id="receptionist", name="小助", title="前台分拣",
-                                 model_config={"provider": "receptionist", "model": "mock"}),
+                                 model_config=_cfg("receptionist")),
         "pm": Employee(id="pm", name="老谋", title="项目经理",
-                       model_config={"provider": "pm", "model": "mock"}),
+                       model_config=_cfg("pm")),
         "reviewer": Employee(id="reviewer", name="严审", title="评审员",
-                             model_config={"provider": "reviewer", "model": "mock"}),
+                             model_config=_cfg("reviewer")),
         "worker": Employee(id="worker", name="阿产", title="验收专员",
-                           model_config={"provider": "worker", "model": "mock"},
+                           model_config=_cfg("worker"),
                            workspace={"dir": "workspaces/worker/"}),
     }
     for e in staff.values():

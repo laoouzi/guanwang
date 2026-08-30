@@ -72,6 +72,8 @@ def _build_parser() -> argparse.ArgumentParser:
     acc_run = acc_sub.add_parser("run", help="运行验收套件")
     acc_run.add_argument("--root", default=".laoban")
     acc_run.add_argument("--suite", default="standard", help="standard | 任务 ID 逗号分隔")
+    acc_run.add_argument("--provider", default="",
+                         help="真实 provider 名（deepseek/qwen/openai/ollama）；默认自动发现环境变量，无则回退演示模式")
 
     return p
 
@@ -169,14 +171,29 @@ def main(argv: list[str] | None = None) -> int:
         from .acceptance import run_acceptance, STANDARD_SUITE
         from .llm.gateway import LLMGateway
         from .llm.mock import MockLLM
+        from .llm.openai_compatible import register_from_env
         gw = LLMGateway()
-        for pid in ("receptionist", "pm", "reviewer", "worker"):
-            gw.register_mock(pid, MockLLM(responses=[f"[{pid}] 验收产出", "[准奏] OK"]))
+        # 真实模式：环境变量自动发现；无则回退演示模式（MockLLM）
+        real = register_from_env(gw)
+        if args.provider:
+            provider = args.provider
+            if provider not in real:
+                print(f"⚠️ 未检测到 provider [{provider}] 的环境变量配置，仍将尝试调用")
+        elif real:
+            provider = real[0]
+        else:
+            provider = None
+        if provider is None:
+            for pid in ("receptionist", "pm", "reviewer", "worker"):
+                gw.register_mock(pid, MockLLM(responses=[f"[{pid}] 验收产出", "[准奏] OK"]))
+            print("演示模式（MockLLM）——设置 LAOBAN_DEEPSEEK_API_KEY 等环境变量可切换真实 LLM\n")
+        else:
+            print(f"真实模式：provider = {provider}\n")
         suite = STANDARD_SUITE
         if args.suite != "standard":
             wanted = {x.strip() for x in args.suite.split(",") if x.strip()}
             suite = tuple(t for t in STANDARD_SUITE if t["id"] in wanted)
-        results = run_acceptance(gw, suite=suite, root_dir=args.root)
+        results = run_acceptance(gw, suite=suite, root_dir=args.root, provider=provider)
         passed = sum(1 for r in results if r["passed"])
         for r in results:
             mark = "✅" if r["passed"] else "❌"

@@ -19,6 +19,13 @@ class LLMGateway:
     def register_mock(self, name: str, llm: MockLLM) -> None:
         self._providers[name] = llm
 
+    def register_provider(self, name: str, llm: Any) -> None:
+        """注册任意 LLMProvider 协议实现（MockLLM / OpenAICompatibleProvider / ...）。"""
+        self._providers[name] = llm
+
+    def list_providers(self) -> list[str]:
+        return list(self._providers)
+
     def chat(self, provider: str, messages: list[Message], tools: list[dict] | None = None) -> LLMResponse:
         if provider not in self._providers:
             raise KeyError(f"未注册的 provider: {provider}")
