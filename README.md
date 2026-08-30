@@ -14,6 +14,13 @@ laoban init              # 初始化你的公司目录（.laoban/）
 laoban hire --name 阿码 --title 开发工程师 --department dev_dept
 laoban hire --name 陈工 --kind human --title 数据核查员 --department dev_dept
 laoban task submit --title "写一个数据清洗函数"
+laoban task assign --id T-xxxx --to dev   # 派发：任务入 dev 工位队列
+laoban queue --who dev                    # 查看员工工位任务队列
+laoban msg send --from pm --to dev --content "请优先处理"
+laoban msg inbox --who dev                # 员工收件箱（最新在前）
+laoban employee suspend --id dev          # 停职（派单守卫自动拦截）
+laoban employee activate --id dev         # 上岗（恢复接单）
+laoban employee terminate --id dev        # 解雇（不可逆）
 laoban todo add --assignee emp-陈工 --title "配合 AI 核查数据" --due 2026-08-30
 laoban today --who emp-陈工          # 人类员工当日任务清单
 laoban todo add --assignee emp-小李 --title "复核异常值" --source self --from emp-陈工
@@ -26,6 +33,9 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 | 概念 | 说明 |
 |---|---|
 | 员工 Employee | 人机统一身份：AI（`kind=ai`，档案化运行）与人类（`kind=human`，入部门树）共用部门/汇报/绩效体系 |
+| 员工生命周期 | 招聘 → 上岗 → 停职（suspended，可恢复）→ 解雇（terminated，**不可逆**）；非 active 员工被派单守卫拦截 |
+| 工位任务队列 | `workspace.queue`：`task assign` 派发入队、完成出队，员工视角的任务清单 |
+| 点对点消息 | Messenger：员工间消息（`collaboration` 空白名单=组织内默认开放；非空=白名单收紧） |
 | 任务状态机 | pending → triage → planning → review ⇄ 驳回(≤3 轮) → assigned → doing ⇄ waiting_human → reporting → done |
 | 权限矩阵 | 协作权限 / 工具权限 / 支出限额 / 自主等级（supervised/semi/full） |
 | 审批队列 | 高危操作 + 支出授权 + 编制申请统一审批单，容量/时间联合触发批量处理 |
@@ -141,6 +151,12 @@ gw.register_provider("my-llm", OpenAICompatibleProvider(
 
 高危操作经 `request_and_maybe_block()` 统一入口，100% 落盘到 `approvals/`（D6 硬保障）。
 
+### 消息权限（`can_message`）
+
+点对点通信使用宽松规则（与工具协作的严格白名单 `can_collaborate` 区分）：
+`permissions.collaboration` **为空 = 组织内默认可联系任何人**；非空 = 白名单模式（只能联系白名单内员工）。
+非在职（suspended/terminated）员工不可发送消息。
+
 ### 验收套件（D2）
 
 ```bash
@@ -160,6 +176,7 @@ laoban acceptance run --root /tmp/laoban-acc
 ├── org.json                  # 组织配置（laoban org init-config 生成，可选）
 ├── tasks/<id>.json           # 任务档案（含 flow_log + progress_log）
 ├── employees/<id>.json       # 员工档案
+├── messages/<id>.json        # 点对点消息（MSG-*）
 ├── human_tasks/<id>.json     # 人类待办（AI 派发的配合任务 / 自建 / 老板指派）
 ├── headcount_requests/       # 编制申请（双轨招聘）
 ├── approvals/<id>.json       # 审批日志（高危必记）

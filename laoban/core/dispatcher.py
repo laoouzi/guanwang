@@ -20,8 +20,14 @@ def resolve_agent_for_state(state: str) -> str | None:
 
 
 def dispatch(task: Task, employees: dict[str, Employee]) -> Employee | None:
-    """根据任务状态解析目标员工。Doing/Next 由 org 推断，v0.1 简化：按状态映射。"""
+    """根据任务状态解析目标员工。Doing/Next 由 org 推断，v0.1 简化：按状态映射。
+
+    守卫：仅在职（status=active）员工可承接任务；停职/解雇员工返回 None。
+    """
     agent_id = resolve_agent_for_state(task.state)
     if agent_id is None:
         return None
-    return employees.get(agent_id)
+    emp = employees.get(agent_id)
+    if emp is None or emp.status != "active":
+        return None
+    return emp

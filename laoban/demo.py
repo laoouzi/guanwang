@@ -9,6 +9,9 @@ from .core.state_machine import advance
 from .core.human_inbox import HumanInbox
 from .core.ledger import Ledger
 from .core.feedback import write_back_experience
+from .core.lifecycle import suspend_employee, activate_employee
+from .core.messenger import send as msg_send, inbox as msg_inbox
+from .core.workstation import enqueue, dequeue, queue_of
 from .bootstrap import bootstrap_org
 from .org import load_org, instantiate, iter_roles
 from .llm.gateway import LLMGateway
@@ -42,6 +45,15 @@ def run_demo() -> int:
         kind = "人类" if e.kind == "human" else "AI"
         print(f"    [{kind}] {e.name}（{e.id}）· {e.title} · {e.department}")
 
+    # ── 2.5 员工生命周期 + 点对点消息 ──
+    print("\n【2.5】员工生命周期与点对点消息")
+    suspend_employee(store, "emp-xiaoli")
+    print("    小李停职（suspended）→ 派单守卫将拒绝向其派发任务")
+    activate_employee(store, "emp-xiaoli")
+    print("    小李上岗（active）→ 恢复接单资格")
+    m = msg_send(store, "pm", "dev", "请优先处理接下来的演示任务", task_id="DEMO-1")
+    print(f"    📨 pm → dev 消息已发送（{m['id']}），dev 收件箱 {len(msg_inbox(store, 'dev'))} 条")
+
     # ── 3. 任务流水线：状态机全程 + 人机协作 ──
     print("\n【3】任务流水线：提交 → 分拣 → 拆解 → 评审 → 派发 → 执行")
     task = Task(id="DEMO-1", title="演示任务：写一个数据清洗函数")
@@ -54,6 +66,9 @@ def run_demo() -> int:
         store.save_task(task)
         ledger.record_step("dev")
         print(f"    {task.state:<14} ← {actor}")
+        if state == ASSIGNED:
+            enqueue(store, "dev", task.id)
+            print(f"    → 任务入队 dev 工位（当前队列 {queue_of(store, 'dev')}）")
 
     # DOING：AI 执行中发现超出能力 → 转人类待办
     advance(task, DOING, actor="dev")
@@ -88,6 +103,9 @@ def run_demo() -> int:
         store.save_task(task)
         ledger.record_step("dev")
         print(f"    {task.state:<14} ← {actor}")
+        if state == DONE:
+            dequeue(store, "dev", task.id)
+            print(f"    → 任务出队 dev 工位（剩余队列 {queue_of(store, 'dev')}）")
 
     # ── 5. 绩效账本 + 经验回写 ──
     ledger.record_completion("dev", task_id=task.id, cost=0.42, elapsed=180)

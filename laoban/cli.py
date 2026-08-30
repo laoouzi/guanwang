@@ -46,6 +46,30 @@ def _build_parser() -> argparse.ArgumentParser:
     emp_list = sub.add_parser("employees", help="列出员工")
     emp_list.add_argument("--root", default=".laoban")
 
+    emp = sub.add_parser("employee", help="员工生命周期（停职/上岗/解雇）")
+    emp_sub = emp.add_subparsers(dest="emp_command", required=True)
+    for name, help_ in (("suspend", "停职（active→suspended，可恢复）"),
+                        ("activate", "上岗（suspended→active）"),
+                        ("terminate", "解雇（→terminated，不可逆）")):
+        s = emp_sub.add_parser(name, help=help_)
+        s.add_argument("--root", default=".laoban")
+        s.add_argument("--id", required=True, help="员工 id")
+
+    msg = sub.add_parser("msg", help="员工点对点消息（collaboration 权限内）")
+    msg_sub = msg.add_subparsers(dest="msg_command", required=True)
+    ms = msg_sub.add_parser("send", help="发消息")
+    ms.add_argument("--root", default=".laoban")
+    ms.add_argument("--from", dest="from_id", required=True)
+    ms.add_argument("--to", required=True)
+    ms.add_argument("--content", required=True)
+    ms.add_argument("--task-id", default="", help="关联任务 id（可选）")
+    mi = msg_sub.add_parser("inbox", help="收件箱（最新在前）")
+    mi.add_argument("--root", default=".laoban")
+    mi.add_argument("--who", required=True)
+    msn = msg_sub.add_parser("sent", help="发件箱")
+    msn.add_argument("--root", default=".laoban")
+    msn.add_argument("--who", required=True)
+
     task = sub.add_parser("task", help="任务操作")
     task_sub = task.add_subparsers(dest="task_command", required=True)
     ts = task_sub.add_parser("submit", help="提交任务")
@@ -74,6 +98,16 @@ def _build_parser() -> argparse.ArgumentParser:
     tr = todo_sub.add_parser("results", help="查看我发起的任务已回传的结果")
     tr.add_argument("--root", default=".laoban")
     tr.add_argument("--who", required=True, help="发起人员工 id")
+
+    tassign = task_sub.add_parser("assign", help="派发任务给员工（入工位队列）")
+    tassign.add_argument("--root", default=".laoban")
+    tassign.add_argument("--id", required=True, help="任务 id")
+    tassign.add_argument("--to", required=True, help="承接员工 id")
+    tassign.add_argument("--actor", default="boss", help="派发人（默认 boss）")
+
+    queue = sub.add_parser("queue", help="查看员工工位任务队列")
+    queue.add_argument("--root", default=".laoban")
+    queue.add_argument("--who", required=True, help="员工 id")
 
     today = sub.add_parser("today", help="人类员工当日任务清单")
     today.add_argument("--root", default=".laoban")
@@ -159,7 +193,74 @@ def main(argv: list[str] | None = None) -> int:
         st = JsonStore(args.root)
         for e in st.list_employees():
             kind_label = "人类" if e.kind == "human" else "AI"
-            print(f"{e.id}\t{kind_label}\t{e.name}\t{e.title}\t{e.department}")
+            print(f"{e.id}\t{kind_label}\t{e.name}\t{e.title}\t{e.department}\t{e.status}")
+        return 0
+
+    if cmd == "employee":
+        from .core.lifecycle import activate_employee, suspend_employee, terminate_employee
+        ops = {"suspend": suspend_employee, "activate": activate_employee,
+               "terminate": terminate_employee}
+        labels = {"suspend": "已停职", "activate": "已上岗", "terminate": "已解雇（不可逆）"}
+        st = JsonStore(args.root)
+        try:
+            emp = ops[args.emp_command](st, args.id)
+        except (KeyError, ValueError) as e:
+            print(f"⚠️ {e}")
+            return 1
+        print(f"{labels[args.emp_command]}：{emp.name}（{emp.id}）")
+        return 0
+
+    if cmd == "msg":
+        from .core.messenger import inbox as msg_inbox, sent as msg_sent, send as msg_send
+        from .core.permission import PermissionDenied
+        st = JsonStore(args.root)
+        if args.msg_command == "send":
+            try:
+                m = msg_send(st, args.from_id, args.to, args.content,
+                             task_id=args.task_id)
+            except (KeyError, ValueError, PermissionDenied) as e:
+                print(f"⚠️ {e}")
+                return 1
+            print(f"消息已发送：{m['id']} {args.from_id} → {args.to}"
+                  + (f"（任务 {m['task_id']}）" if m["task_id"] else ""))
+            return 0
+        if args.msg_command == "inbox":
+            box = msg_inbox(st, args.who)
+            if not box:
+                print(f"{args.who} 收件箱为空")
+                return 0
+            print(f"📥 {args.who} 的收件箱（{len(box)} 条，最新在前）：")
+            for m in box:
+                task_part = f"（任务 {m['task_id']}）" if m.get("task_id") else ""
+                print(f"  {m['id']} {m['from']} → {m['to']}{task_part}")
+                print(f"    {m['content']}")
+            return 0
+        if args.msg_command == "sent":
+            out = msg_sent(st, args.who)
+            if not out:
+                print(f"{args.who} 发件箱为空")
+                return 0
+            print(f"📤 {args.who} 的发件箱（{len(out)} 条，最新在前）：")
+            for m in out:
+                print(f"  {m['id']} {m['from']} → {m['to']}：{m['content']}")
+            return 0
+
+    if cmd == "queue":
+        from .core.workstation import queue_of
+        st = JsonStore(args.root)
+        try:
+            q = queue_of(st, args.who)
+        except KeyError as e:
+            print(f"⚠️ {e}")
+            return 1
+        if not q:
+            print(f"{args.who} 工位队列为空")
+            return 0
+        print(f"🗂 {args.who} 的工位任务队列（{len(q)} 个）：")
+        for tid in q:
+            t = st.load_task(tid)
+            title = t.title if t else "（任务档案缺失）"
+            print(f"  {tid}\t{title}")
         return 0
 
     if cmd == "task":
@@ -168,6 +269,16 @@ def main(argv: list[str] | None = None) -> int:
             tid = f"T-{uuid.uuid4().hex[:6]}"
             st.save_task(Task(id=tid, title=args.title))
             print(f"任务已提交：{tid} {args.title}")
+            return 0
+        if args.task_command == "assign":
+            from .core.state_machine import IllegalTransition
+            from .core.workstation import assign_task
+            try:
+                t = assign_task(st, args.id, args.to, actor=args.actor)
+            except (KeyError, ValueError, IllegalTransition) as e:
+                print(f"⚠️ {e}")
+                return 1
+            print(f"任务已派发：{t.id} {t.title} → {args.to}（已入工位队列）")
             return 0
         if args.task_command == "status":
             for t in st.list_tasks():
