@@ -57,7 +57,7 @@ class TestReviewer(unittest.TestCase):
     def test_approve(self):
         gw = make_gateway("[准奏] 方案完整，验收标准明确")
         r = Reviewer(gw, checklist=["完整性"])
-        decision = r.review(Employee(id="reviewer", name="严审"),
+        decision = r.review(Employee(id="reviewer", name="严审", model_config={"provider": "reviewer"}),
                             Task(id="T-1", title="x"), plan="方案内容")
         self.assertTrue(decision.approved)
         self.assertIn("准奏", decision.reason)
@@ -65,7 +65,7 @@ class TestReviewer(unittest.TestCase):
     def test_reject(self):
         gw = make_gateway("[封驳] 缺少性能测试")
         r = Reviewer(gw, checklist=["完整性"])
-        decision = r.review(Employee(id="reviewer", name="严审"),
+        decision = r.review(Employee(id="reviewer", name="严审", model_config={"provider": "reviewer"}),
                             Task(id="T-1", title="x"), plan="")
         self.assertFalse(decision.approved)
 
@@ -76,7 +76,8 @@ class TestReviewer(unittest.TestCase):
     def test_reject_keyword_bohui(self):
         gw = make_gateway("驳回：方案不完整")
         r = Reviewer(gw)
-        decision = r.review(Employee(id="reviewer", name="严审"), Task(id="T-1", title="x"), plan="")
+        decision = r.review(Employee(id="reviewer", name="严审", model_config={"provider": "reviewer"}),
+                            Task(id="T-1", title="x"), plan="")
         self.assertFalse(decision.approved)
 
 
