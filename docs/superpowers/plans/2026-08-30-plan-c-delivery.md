@@ -47,7 +47,7 @@ README.md                      # [新增]
 - Create: `laoban/core/ledger.py`
 - Test: `tests/test_ledger.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/test_ledger.py`:
 ```python
@@ -93,12 +93,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd /workspace && python -m unittest tests.test_ledger -v`
 Expected: FAIL（`ModuleNotFoundError: No module named 'laoban.core.ledger'`）
 
-- [ ] **Step 3: 实现 ledger.py**
+- [x] **Step 3: 实现 ledger.py**
 
 `laoban/core/ledger.py`:
 ```python
@@ -149,12 +149,12 @@ class Ledger:
         }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_ledger -v`
 Expected: PASS（4 tests OK）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /workspace && git add laoban/core/ledger.py tests/test_ledger.py && git commit -m "feat: 绩效账本 Ledger（含人类介入率）"
@@ -168,7 +168,7 @@ cd /workspace && git add laoban/core/ledger.py tests/test_ledger.py && git commi
 - Create: `laoban/core/feedback.py`
 - Test: `tests/test_ledger.py`（追加）
 
-- [ ] **Step 1: 追加失败测试**
+- [x] **Step 1: 追加失败测试**
 
 在 `tests/test_ledger.py` 末尾追加：
 ```python
@@ -189,12 +189,12 @@ class TestFeedback(unittest.TestCase):
         self.assertEqual(emp.memory["experiences"][0]["outcome"], "failure")
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd /workspace && python -m unittest tests.test_ledger.TestFeedback -v`
 Expected: FAIL（`ModuleNotFoundError: No module named 'laoban.core.feedback'`）
 
-- [ ] **Step 3: 实现 feedback.py**
+- [x] **Step 3: 实现 feedback.py**
 
 `laoban/core/feedback.py`:
 ```python
@@ -210,12 +210,12 @@ def write_back_experience(emp: Employee, task_type: str, score: int, comment: st
     record_experience(emp, task_type=task_type, outcome=outcome, learned=comment or "")
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_ledger -v`
 Expected: PASS（6 tests OK）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /workspace && git add laoban/core/feedback.py tests/test_ledger.py && git commit -m "feat: 经验回写（验收评分 → 员工记忆）"
@@ -230,7 +230,7 @@ cd /workspace && git add laoban/core/feedback.py tests/test_ledger.py && git com
 - Create: `laoban/__main__.py`
 - Test: `tests/test_cli_full.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/test_cli_full.py`:
 ```python
@@ -264,12 +264,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd /workspace && python -m unittest tests.test_cli_full -v`
 Expected: FAIL（`hire`/`task` 子命令不存在）
 
-- [ ] **Step 3: 实现 cli.py 与 __main__.py**
+- [x] **Step 3: 实现 cli.py 与 __main__.py**
 
 `laoban/cli.py`（完整替换）:
 ```python
@@ -365,12 +365,12 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_cli_full tests.test_cli -v`
 Expected: PASS（Plan A 的 cli init 测试 + 新测试全部通过）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /workspace && git add laoban/cli.py laoban/__main__.py tests/test_cli_full.py && git commit -m "feat: CLI 完整子命令（init/hire/employees/task）"
@@ -386,7 +386,7 @@ cd /workspace && git add laoban/cli.py laoban/__main__.py tests/test_cli_full.py
 - Create: `laoban/dashboard/dashboard.html`
 - Test: `tests/test_dashboard.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/test_dashboard.py`:
 ```python
@@ -436,12 +436,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd /workspace && python -m unittest tests.test_dashboard -v`
 Expected: FAIL（`ModuleNotFoundError: No module named 'laoban.dashboard.server'`）
 
-- [ ] **Step 3: 实现 server.py 与 dashboard.html**
+- [x] **Step 3: 实现 server.py 与 dashboard.html**
 
 `laoban/dashboard/__init__.py`:
 ```python
@@ -536,12 +536,12 @@ class DashboardServer:
 </html>
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_dashboard -v`
 Expected: PASS（3 tests OK）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /workspace && git add laoban/dashboard/ tests/test_dashboard.py && git commit -m "feat: Web 看板（标准库 HTTP + 单文件 HTML）"
@@ -555,7 +555,7 @@ cd /workspace && git add laoban/dashboard/ tests/test_dashboard.py && git commit
 - Create: `laoban/bootstrap.py`
 - Test: `tests/test_bootstrap.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/test_bootstrap.py`:
 ```python
@@ -594,12 +594,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd /workspace && python -m unittest tests.test_bootstrap -v`
 Expected: FAIL（`ModuleNotFoundError: No module named 'laoban.bootstrap'`）
 
-- [ ] **Step 3: 实现 bootstrap.py**
+- [x] **Step 3: 实现 bootstrap.py**
 
 `laoban/bootstrap.py`:
 ```python
@@ -636,12 +636,12 @@ def bootstrap_org(store: JsonStore, gateway: LLMGateway, business: str) -> dict:
     return result
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_bootstrap -v`
 Expected: PASS（2 tests OK）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /workspace && git add laoban/bootstrap.py tests/test_bootstrap.py && git commit -m "feat: 启动模式（三元老组织设计）"
@@ -655,7 +655,7 @@ cd /workspace && git add laoban/bootstrap.py tests/test_bootstrap.py && git comm
 - Create: `laoban/recruitment.py`
 - Test: `tests/test_recruitment.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/test_recruitment.py`:
 ```python
@@ -692,12 +692,12 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd /workspace && python -m unittest tests.test_recruitment -v`
 Expected: FAIL（`ModuleNotFoundError: No module named 'laoban.recruitment'`）
 
-- [ ] **Step 3: 实现 recruitment.py**
+- [x] **Step 3: 实现 recruitment.py**
 
 `laoban/recruitment.py`:
 ```python
@@ -730,12 +730,12 @@ def approve_headcount(store: JsonStore, req_id: str, approver: str) -> None:
     store.save_employee(emp)
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd /workspace && python -m unittest tests.test_recruitment -v`
 Expected: PASS（2 tests OK）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /workspace && git add laoban/recruitment.py tests/test_recruitment.py && git commit -m "feat: 双轨招聘（编制申请审批）"
@@ -750,7 +750,7 @@ cd /workspace && git add laoban/recruitment.py tests/test_recruitment.py && git 
 - Create: `README.md`
 - Create: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: 写演示脚本**
+- [x] **Step 1: 写演示脚本**
 
 `laoban/demo.py`:
 ```python
@@ -792,7 +792,7 @@ if __name__ == "__main__":
     raise SystemExit(run_demo())
 ```
 
-- [ ] **Step 2: 写 README.md**
+- [x] **Step 2: 写 README.md**
 
 `README.md`:
 ```markdown
@@ -823,7 +823,7 @@ laoban task submit --title "写一个函数"
 - 法务专家提示为常识级参考，不构成法律意见；AI 产出由部署者承担使用责任。
 ```
 
-- [ ] **Step 3: 写 CI**
+- [x] **Step 3: 写 CI**
 
 `.github/workflows/ci.yml`:
 ```yaml
@@ -840,12 +840,12 @@ jobs:
       - run: python -m unittest discover -v
 ```
 
-- [ ] **Step 4: 全量回归**
+- [x] **Step 4: 全量回归**
 
 Run: `cd /workspace && python -m unittest discover -v`
 Expected: PASS（Plan A + B + C 全部测试通过）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /workspace && git add laoban/demo.py README.md .github/workflows/ci.yml && git commit -m "feat: 演示脚本、README 与 CI"
