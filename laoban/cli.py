@@ -65,7 +65,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    try:
+        args = _build_parser().parse_args(argv)
+    except SystemExit as e:
+        # argparse 对未知命令/--help 直接 SystemExit，统一转为返回码
+        return e.code if isinstance(e.code, int) else 1
     cmd = args.command
 
     if cmd == "init":
