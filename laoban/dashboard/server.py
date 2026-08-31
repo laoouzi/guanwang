@@ -11,7 +11,12 @@ from ..core.store import JsonStore
 from ..core.employee import Employee
 from ..core.human_inbox import HumanInbox
 from ..core.messenger import inbox as msg_inbox, sent as msg_sent
-from ..core.workstation import queue_of
+from ..core.workstation import (queue_of, assign_task_auto, dequeue)
+from ..core.task import Task, DOING, REPORTING, DONE
+from ..core.state_machine import advance, IllegalTransition
+from ..core.feedback import write_back_experience
+from ..core.ledger import FileLedger
+from ..runner.approval_log import ApprovalLog
 from . import rbac
 
 SESSION_COOKIE = "laoban_session"
@@ -180,7 +185,138 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._error(503, "未配置飞书接入（LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET）")
             status, payload = self.feishu.handle(self._read_body())
             return self._json(payload, status)
+
+        # ---- 任务操作 / 审批决策（老板驾驶舱）----
+        if u.path in ("/api/task/submit", "/api/task/assign",
+                      "/api/task/accept", "/api/approval/decide"):
+            return self._handle_operation(u.path)
         return self._error(404, f"未知路径：{u.path}")
+
+    def _actor(self, me) -> str:
+        return me.id if me is not None else "dashboard"
+
+    def _handle_operation(self, path: str):
+        """操作端点统一入口：登录校验 → 角色守卫 → 复用 core 逻辑。"""
+        if self.auth and self.auth.enabled() and not self._session_emp():
+            return self._error(401, "请先登录")
+        role, me = self._view()
+        body = self._read_body()
+        try:
+            if path == "/api/task/submit":
+                return self._op_submit(role, me, body)
+            if path == "/api/task/assign":
+                return self._op_assign(role, me, body)
+            if path == "/api/task/accept":
+                return self._op_accept(role, me, body)
+            if path == "/api/approval/decide":
+                return self._op_approve(role, me, body)
+        except KeyError as e:
+            return self._error(404, str(e))
+        except ValueError as e:
+            return self._error(409, str(e))
+        except IllegalTransition as e:
+            return self._error(409, str(e))
+        return self._error(404, f"未知路径：{path}")
+
+    def _op_submit(self, role: str, me, body: dict):
+        """提交任务：任何登录员工都可（免鉴权模式任何人）。"""
+        title = str(body.get("title", "")).strip()
+        if not title:
+            return self._error(400, "缺少 title")
+        task = Task(id=f"T-{uuid.uuid4().hex[:6]}", title=title,
+                    instruction=str(body.get("instruction", "")).strip())
+        self.store.save_task(task)
+        return self._json({"id": task.id, "title": task.title,
+                           "state": task.state,
+                           "message": f"任务已提交：{task.id}"})
+
+    def _op_assign(self, role: str, me, body: dict):
+        """派发：admin 全公司；manager 仅本部门成员；staff 拒绝。"""
+        task_id = str(body.get("id", "")).strip()
+        to = str(body.get("to", "")).strip()
+        if not (task_id and to):
+            return self._error(400, "缺少 id / to")
+        if role not in (rbac.ADMIN, rbac.MANAGER):
+            return self._error(403, "仅管理员或部门负责人可派单")
+        if role == rbac.MANAGER and to not in rbac.dept_members(self.store, me):
+            return self._error(403, "只能派发给本部门成员")
+        task = assign_task_auto(self.store, task_id, to, actor=self._actor(me))
+        self.ledger.record_step(to)
+        return self._json({"id": task.id, "state": task.state,
+                           "message": f"任务已派发给 {to}（已入工位队列）"})
+
+    def _op_accept(self, role: str, me, body: dict):
+        """验收：DOING/REPORTING → DONE；评分回写记忆 + 账本记账 + 出队。"""
+        task_id = str(body.get("id", "")).strip()
+        if not task_id:
+            return self._error(400, "缺少 id")
+        try:
+            score = int(body.get("score", 0))
+        except (TypeError, ValueError):
+            return self._error(400, "score 必须是 1-5 的整数")
+        if not 1 <= score <= 5:
+            return self._error(400, "score 必须在 1-5")
+        comment = str(body.get("comment", "")).strip()
+        task = self.store.load_task(task_id)
+        if not task:
+            return self._error(404, f"任务不存在：{task_id}")
+
+        # 找承接人（工位队列里有这个任务的人）
+        assignee = ""
+        for e in self.store.list_employees():
+            if task_id in e.workspace.get("queue", []):
+                assignee = e.id
+                break
+        if role == rbac.MANAGER and assignee and \
+                assignee not in rbac.dept_members(self.store, me):
+            return self._error(403, "只能验收本部门成员的任务")
+
+        if task.state not in (DOING, REPORTING):
+            return self._error(409, f"当前状态 {task.state} 不可验收（需 doing/reporting）")
+        actor = self._actor(me)
+        if task.state == DOING:
+            advance(task, REPORTING, actor=actor, remark="验收前汇报（看板）")
+        advance(task, DONE, actor=actor,
+                remark=f"验收通过（评分 {score}/5）{('：' + comment) if comment else ''}")
+        self.store.save_task(task)
+        if assignee:
+            dequeue(self.store, assignee, task_id)
+            # 经验回写：低分记 failure，高分记 success
+            emp = self.store.load_employee(assignee)
+            if emp:
+                write_back_experience(emp, task_type=task.title,
+                                      score=score, comment=comment)
+                self.store.save_employee(emp)
+            self.ledger.record_completion(assignee, task_id=task_id)
+            self.ledger.record_step(assignee)
+        return self._json({"id": task.id, "state": task.state,
+                           "assignee": assignee,
+                           "message": f"任务已完成（评分 {score}/5）"})
+
+    def _op_approve(self, role: str, me, body: dict):
+        """审批决策：仅 admin。落审批日志 + 账本记人类介入。"""
+        if role != rbac.ADMIN:
+            return self._error(403, "仅管理员可审批")
+        log_id = str(body.get("id", "")).strip()
+        if not log_id:
+            return self._error(400, "缺少 id")
+        approved = bool(body.get("approved", False))
+        opinion = str(body.get("opinion", "")).strip()
+        log = ApprovalLog(self.store)
+        try:
+            entry = next(e for e in log.list_logs()
+                         if e.id == log_id and e.request.get("status") == "pending")
+        except StopIteration:
+            return self._error(404, f"待审批单不存在或已处理：{log_id}")
+        log.log_decision(log_id, approver=self._actor(me),
+                         approved=approved, opinion=opinion)
+        requester = entry.request.get("requester", "")
+        if requester:
+            self.ledger.record_human_intervention(requester, "approval")
+            self.ledger.record_step(requester)
+        return self._json({"id": log_id,
+                           "status": "approved" if approved else "rejected",
+                           "message": "已通过" if approved else "已驳回"})
 
     def _who_required(self, u) -> str | None:
         who = parse_qs(u.query).get("who", [""])[0]
@@ -264,6 +400,32 @@ class _Handler(BaseHTTPRequestHandler):
                 if tid in tasks else {"id": tid, "title": "（任务档案缺失）", "state": ""}
                 for tid in task_ids
             ])
+        if u.path == "/api/approvals":
+            # 审批单：admin 全部；manager/staff 仅自己发起的
+            status = parse_qs(u.query).get("status", [""])[0]
+            logs = ApprovalLog(self.store).list_logs(status=status)
+            if role != rbac.ADMIN and me is not None:
+                logs = [e for e in logs if e.request.get("requester") == me.id]
+            return self._json([{
+                "id": e.id, "type": e.request.get("type", ""),
+                "risk": e.request.get("risk", ""),
+                "requester": e.request.get("requester", ""),
+                "summary": e.request.get("summary", ""),
+                "status": e.request.get("status", "pending"),
+                "approver": e.approver, "opinion": e.opinion,
+            } for e in logs])
+        if u.path == "/api/perf":
+            # 绩效面板：admin 全公司；manager 本部门；staff 仅本人
+            stats_all = self.ledger.stats_all()
+            if role == rbac.ADMIN:
+                visible = set(stats_all)
+            elif me is not None:
+                allowed = rbac.dept_members(self.store, me) if role == rbac.MANAGER else {me.id}
+                visible = set(stats_all) & allowed
+            else:
+                visible = set(stats_all)
+            return self._json({
+                emp_id: stats_all[emp_id] for emp_id in sorted(visible)})
         # 默认返回看板 HTML
         html = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
         body = html.encode()
@@ -313,6 +475,7 @@ class DashboardServer:
         handler = type("H", (_Handler,), {
             "store": store, "gateway": gateway, "feishu": feishu,
             "auth": auth, "sessions": {},
+            "ledger": FileLedger(store),   # 持久化绩效账本（验收/审批记账）
         })
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.port = self.httpd.server_address[1]

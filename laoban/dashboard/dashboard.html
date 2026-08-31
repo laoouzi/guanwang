@@ -46,6 +46,40 @@
     <span id="meInfo" class="msg-meta"></span>
   </p>
 
+  <h2>任务驾驶舱</h2>
+  <p id="opMsg" class="msg-meta"></p>
+  <p>
+    <input id="newTaskTitle" placeholder="新任务标题" style="width:30%" />
+    <input id="newTaskInstr" placeholder="任务说明（可选）" style="width:40%" />
+    <button onclick="submitTask()">提交任务</button>
+  </p>
+  <p id="assignRow">
+    <input id="assignId" placeholder="任务 id，如 T-abc123" />
+    <input id="assignTo" list="rosterIds" placeholder="派给谁（同事 id）" />
+    <datalist id="rosterIds"></datalist>
+    <button onclick="assignTask()">派发</button>
+  </p>
+  <p id="acceptRow">
+    <input id="acceptId" placeholder="任务 id（doing/reporting）" />
+    <select id="acceptScore">
+      <option value="5">5 优秀</option><option value="4" selected>4 良好</option>
+      <option value="3">3 合格</option><option value="2">2 待改</option>
+      <option value="1">1 驳回</option>
+    </select>
+    <input id="acceptComment" placeholder="验收意见（可选，会回写员工记忆）" style="width:30%" />
+    <button onclick="acceptTask()">验收</button>
+  </p>
+
+  <h2 id="approvalSection">审批队列</h2>
+  <table id="approvals"><thead><tr>
+    <th>ID</th><th>类型</th><th>风险</th><th>发起人</th><th>摘要</th><th>状态</th><th>操作</th>
+  </tr></thead><tbody></tbody></table>
+
+  <h2 id="perfSection">绩效面板</h2>
+  <table id="perf"><thead><tr>
+    <th>员工</th><th>完成数</th><th>总成本</th><th>平均耗时</th><th>驳回率</th><th>人类介入率</th>
+  </tr></thead><tbody></tbody></table>
+
   <h2>组织架构</h2>
   <div id="org"></div>
 
@@ -118,8 +152,13 @@
       document.getElementById('aiEmployees').innerHTML = es.filter(e =>
         e.kind === 'ai').map(e =>
         `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.title || 'AI 员工')}（${esc(STATUS_LABEL[e.status] || e.status)}）</option>`).join('');
+      // 派单目标下拉：全员
+      document.getElementById('rosterIds').innerHTML = es.map(e =>
+        `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.title || '')}（${esc(STATUS_LABEL[e.status] || e.status)}）</option>`).join('');
       await loadOrg();
       await loadMe();
+      await loadApprovals();
+      await loadPerf();
     }
 
     async function loadMe() {
@@ -132,6 +171,7 @@
     function setMe(me) {
       const info = document.getElementById('meInfo');
       const from = document.getElementById('chatFrom');
+      window._me = me || {};   // loadApprovals 判断是否 admin 用
       // 个人数据查询框：登录后按角色锁定（staff/manager 只能查自己相关）
       const personal = ['msgWho', 'queueWho', 'who'];
       const scoped = {   // role → 需要锁定为本人的查询框
@@ -154,11 +194,111 @@
           el.value = (scoped[role] || personal).includes(id) ? me.id : el.value;
           el.disabled = (scoped[role] || personal).includes(id);
         }
+        // 操作区按角色显隐：staff 只能提交；manager 派单+验收（本部门）；admin 全量
+        const canManage = role === 'admin' || role === 'manager';
+        document.getElementById('assignRow').style.display = canManage ? '' : 'none';
+        document.getElementById('acceptRow').style.display = canManage ? '' : 'none';
       } else {
         info.textContent = '';
         from.disabled = false;
         for (const id of personal) document.getElementById(id).disabled = false;
+        document.getElementById('assignRow').style.display = '';
+        document.getElementById('acceptRow').style.display = '';
       }
+    }
+
+    // ---- 任务驾驶舱 ----
+    async function opPost(path, payload) {
+      const resp = await fetch(path, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json().catch(() => ({}));
+      return { ok: resp.ok, status: resp.status, data };
+    }
+
+    function opFeedback(ok, data, status) {
+      const el = document.getElementById('opMsg');
+      el.textContent = ok ? (data.message || '操作成功')
+                          : `⚠️ ${data.error || ('HTTP ' + status)}`;
+      el.style.color = ok ? '#2a7a2a' : '#b33';
+      if (ok) { load(); loadApprovals(); loadPerf(); }
+    }
+
+    async function submitTask() {
+      const title = document.getElementById('newTaskTitle').value.trim();
+      const instruction = document.getElementById('newTaskInstr').value.trim();
+      if (!title) { alert('请输入任务标题'); return; }
+      const { ok, data, status } = await opPost('/api/task/submit', { title, instruction });
+      if (ok) {
+        document.getElementById('newTaskTitle').value = '';
+        document.getElementById('newTaskInstr').value = '';
+        document.getElementById('assignId').value = data.id;   // 顺手填入派单框
+      }
+      opFeedback(ok, data, status);
+    }
+
+    async function assignTask() {
+      const id = document.getElementById('assignId').value.trim();
+      const to = document.getElementById('assignTo').value.trim();
+      if (!id || !to) { alert('请填写任务 id 与承接人'); return; }
+      const { ok, data, status } = await opPost('/api/task/assign', { id, to });
+      if (ok) {
+        document.getElementById('assignId').value = '';
+        document.getElementById('acceptId').value = data.id;   // 顺手填入验收框
+      }
+      opFeedback(ok, data, status);
+    }
+
+    async function acceptTask() {
+      const id = document.getElementById('acceptId').value.trim();
+      const score = parseInt(document.getElementById('acceptScore').value, 10);
+      const comment = document.getElementById('acceptComment').value.trim();
+      if (!id) { alert('请填写任务 id'); return; }
+      const { ok, data, status } = await opPost('/api/task/accept', { id, score, comment });
+      if (ok) {
+        document.getElementById('acceptId').value = '';
+        document.getElementById('acceptComment').value = '';
+      }
+      opFeedback(ok, data, status);
+    }
+
+    async function decideApproval(id, approved) {
+      const opinion = prompt(approved ? '审批意见（可空）：' : '驳回理由（可空）：') || '';
+      const { ok, data, status } = await opPost('/api/approval/decide',
+                                                { id, approved, opinion });
+      opFeedback(ok, data, status);
+    }
+
+    async function loadApprovals() {
+      const resp = await fetch('/api/approvals');
+      if (!resp.ok) return;
+      const rows = await resp.json();
+      const me = window._me || {};
+      const isAdmin = (me.role || 'admin') === 'admin';
+      document.querySelector('#approvals tbody').innerHTML = rows.length ? rows.map(a => {
+        const pending = a.status === 'pending';
+        const ops = pending && isAdmin
+          ? `<button onclick="decideApproval('${esc(a.id)}', true)">通过</button> ` +
+            `<button onclick="decideApproval('${esc(a.id)}', false)">驳回</button>`
+          : esc(a.opinion || '-');
+        return `<tr><td>${esc(a.id)}</td><td>${esc(a.type)}</td><td>${esc(a.risk)}</td>` +
+               `<td>${esc(a.requester)}</td><td>${esc(a.summary)}</td>` +
+               `<td>${esc(a.status)}</td><td>${ops}</td></tr>`;
+      }).join('') : '<tr><td colspan="7" class="empty">暂无审批单</td></tr>';
+    }
+
+    async function loadPerf() {
+      const resp = await fetch('/api/perf');
+      if (!resp.ok) return;
+      const perf = await resp.json();
+      const pct = v => (v * 100).toFixed(0) + '%';
+      document.querySelector('#perf tbody').innerHTML = Object.keys(perf).length
+        ? Object.entries(perf).map(([id, s]) =>
+          `<tr><td>${esc(id)}</td><td>${s.completion_count}</td>` +
+          `<td>${s.total_cost.toFixed(2)}</td><td>${s.avg_elapsed.toFixed(1)}s</td>` +
+          `<td>${pct(s.rejection_rate)}</td><td>${pct(s.human_intervention_rate)}</td></tr>`).join('')
+        : '<tr><td colspan="6" class="empty">暂无绩效数据（验收/审批后记账）</td></tr>';
     }
 
     async function doLogin() {

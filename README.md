@@ -33,6 +33,8 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 
 | 概念 | 说明 |
 |---|---|
+| 任务驾驶舱 | 看板网页直接完成：提交任务 → 派单 → 验收评分（1-5，回写员工记忆+记账）→ 审批队列处理；操作按 RBAC 角色收权（staff 仅提交，manager 本部门，admin 全量） |
+| 绩效账本 | 完成数 / 成本 / 驳回率 / **人类介入率**（衡量 AI 自主程度）；验收/审批实时记账，落盘 `ledger.json` 重启不丢 |
 | 员工 Employee | 人机统一身份：AI（`kind=ai`，档案化运行）与人类（`kind=human`，入部门树）共用部门/汇报/绩效体系 |
 | 员工生命周期 | 招聘 → 上岗 → 停职（suspended，可恢复）→ 解雇（terminated，**不可逆**）；非 active 员工被派单守卫拦截 |
 | 工位任务队列 | `workspace.queue`：`task assign` 派发入队、完成出队，员工视角的任务清单 |
@@ -254,9 +256,10 @@ laoban acceptance run --root /tmp/laoban-acc
 ├── messages/<id>.json        # 点对点消息（MSG-*）
 ├── im_bindings.json          # IM 账号 ↔ 员工 id 绑定表（laoban im bind）
 ├── auth.json                 # 员工口令库（PBKDF2 盐+哈希，laoban auth passwd）
+├── ledger.json               # 绩效账本（看板验收/审批自动记账）
+├── approvals/                # 审批单档案（每单一 JSON，看板可处理）
 ├── human_tasks/<id>.json     # 人类待办（AI 派发的配合任务 / 自建 / 老板指派）
 ├── headcount_requests/       # 编制申请（双轨招聘）
-├── approvals/<id>.json       # 审批日志（高危必记）
 └── workspaces/<emp_id>/      # 员工工位产出物
 ```
 

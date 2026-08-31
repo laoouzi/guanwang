@@ -91,6 +91,9 @@ class _Client:
     def get(self, path):
         return self._req("GET", path)
 
+    def post(self, path, payload):
+        return self._req("POST", path, payload)
+
     def login(self, emp_id, pw):
         return self._req("POST", "/api/login", {"id": emp_id, "password": pw})
 

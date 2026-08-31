@@ -302,9 +302,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.task_command == "assign":
             from .core.state_machine import IllegalTransition
-            from .core.workstation import assign_task
+            from .core.workstation import assign_task_auto
             try:
-                t = assign_task(st, args.id, args.to, actor=args.actor)
+                t = assign_task_auto(st, args.id, args.to, actor=args.actor)
             except (KeyError, ValueError, IllegalTransition) as e:
                 print(f"⚠️ {e}")
                 return 1

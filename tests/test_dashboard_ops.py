@@ -1,0 +1,295 @@
+"""看板操作端点（老板驾驶舱）测试：提交 / 派单 / 验收 / 审批 / 绩效。
+
+覆盖：
+- 免鉴权模式：提交→派单→验收全流程闭环（含状态机、队列、经验回写、账本）
+- RBAC：staff 不可派单/审批；manager 只能派/验收本部门；跨部门 403
+- 验收：评分 1-5 边界、状态守卫（非 doing/reporting 拒绝）、低分记 failure
+- 审批：仅 admin 可决策；重复决策 404；账本记人类介入
+- 绩效：三角色可见范围 + FileLedger 重启不丢（新实例读到旧数据）
+"""
+from __future__ import annotations
+
+import tempfile
+import threading
+import unittest
+
+from laoban.core.auth import AuthStore
+from laoban.core.employee import Employee
+from laoban.core.store import JsonStore
+from laoban.core.task import Task, TRIAGE, PLANNING, REVIEW, ASSIGNED, DOING
+from laoban.core.state_machine import advance
+from laoban.core.workstation import assign_task_auto, enqueue
+from laoban.dashboard.server import DashboardServer
+from laoban.runner.approval_log import (ApprovalLog, ApprovalRequest)
+from tests.test_rbac import _mk_store, _Client
+
+
+def _mk_free_store():
+    """免鉴权模式测试库：dev_dept + fin_dept + boss。"""
+    st = JsonStore(tempfile.mkdtemp())
+    st.save_employee(Employee(
+        id="mgr-dev", name="沈负责人", kind="human", department="dev_dept"))
+    st.save_employee(Employee(
+        id="dev", name="阿码", kind="ai", department="dev_dept"))
+    st.save_employee(Employee(
+        id="emp-chen", name="陈工", kind="human", department="dev_dept",
+        reports_to="mgr-dev"))
+    st.save_employee(Employee(
+        id="emp-wang", name="王姐", kind="human", department="fin_dept"))
+    return st
+
+
+def _mk_auth_store():
+    st = _mk_store()
+    au = AuthStore(st.root)
+    au.set_password("boss", "pw-boss")
+    au.set_password("mgr-dev", "pw-mgr")
+    au.set_password("emp-chen", "pw-chen")
+    return st, au
+
+
+class TestOpsFreeAuth(unittest.TestCase):
+    """免鉴权模式：全流程闭环（向后兼容，未设口令= admin 视角）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.store = _mk_free_store()
+        cls.server = DashboardServer(cls.store, port=0)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.client = _Client(f"http://127.0.0.1:{cls.server.port}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def test_full_loop_submit_assign_accept(self):
+        # 0. 账本基线（增量断言，避免依赖测试执行顺序）
+        _, perf0 = self.client.get("/api/perf")
+        base = perf0.get("dev", {}).get("completion_count", 0)
+
+        # 1. 提交
+        status, body = self.client.post("/api/task/submit",
+                                        {"title": "清洗函数", "instruction": "写代码"})
+        self.assertEqual(status, 200)
+        tid = body["id"]
+        self.assertEqual(body["state"], "pending")
+
+        # 2. 派单（免鉴权 = admin）
+        status, body = self.client.post("/api/task/assign", {"id": tid, "to": "dev"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["state"], "assigned")
+        # 队列入列
+        from laoban.core.workstation import queue_of
+        self.assertIn(tid, queue_of(self.store, "dev"))
+
+        # 3. 推进到 doing（模拟员工开工）
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="dev", remark="开工")
+        self.store.save_task(t)
+
+        # 4. 验收（评分 4）
+        status, body = self.client.post("/api/task/accept",
+                                        {"id": tid, "score": 4, "comment": "不错"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["state"], "done")
+        # 出队
+        self.assertNotIn(tid, queue_of(self.store, "dev"))
+        # 经验回写（score>=3 → success）
+        dev = self.store.load_employee("dev")
+        self.assertEqual(dev.memory["experiences"][-1]["outcome"], "success")
+        self.assertEqual(dev.memory["experiences"][-1]["task_type"], "清洗函数")
+        # 账本记账（FileLedger 落盘）
+        _, perf = self.client.get("/api/perf")
+        self.assertGreaterEqual(perf["dev"]["completion_count"], base + 1)
+
+    def test_accept_rejects_bad_state_and_score(self):
+        # score 边界
+        status, body = self.client.post("/api/task/accept", {"id": "X", "score": 0})
+        self.assertEqual(status, 400)
+        status, body = self.client.post("/api/task/accept", {"id": "X", "score": 6})
+        self.assertEqual(status, 400)
+        # pending 状态不可验收
+        _, body = self.client.post("/api/task/submit", {"title": "占位"})
+        status, body = self.client.post("/api/task/accept",
+                                        {"id": body["id"], "score": 3})
+        self.assertEqual(status, 409)
+
+    def test_low_score_records_failure(self):
+        _, sub = self.client.post("/api/task/submit", {"title": "低分任务"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "dev"})
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="dev")
+        self.store.save_task(t)
+        self.client.post("/api/task/accept", {"id": tid, "score": 1})
+        dev = self.store.load_employee("dev")
+        self.assertEqual(dev.memory["experiences"][-1]["outcome"], "failure")
+
+    def test_file_ledger_persists(self):
+        """记账后新 server 实例（模拟重启）能读到旧账。"""
+        # 本测试自证：先走一遍完整验收产生账目
+        _, sub = self.client.post("/api/task/submit", {"title": "重启账目"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "dev"})
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="dev")
+        self.store.save_task(t)
+        self.client.post("/api/task/accept", {"id": tid, "score": 5})
+        _, perf = self.client.get("/api/perf")
+        before = perf["dev"]["completion_count"]
+        # 模拟重启：新实例从磁盘加载账本
+        s2 = DashboardServer(self.store, port=0)
+        threading.Thread(target=s2.serve_forever, daemon=True).start()
+        try:
+            c2 = _Client(f"http://127.0.0.1:{s2.port}")
+            status, perf = c2.get("/api/perf")
+            self.assertEqual(status, 200)
+            self.assertEqual(perf["dev"]["completion_count"], before)
+        finally:
+            s2.shutdown()
+
+
+class TestOpsRbac(unittest.TestCase):
+    """操作端点角色守卫。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.store, cls.auth = _mk_auth_store()
+        cls.server = DashboardServer(cls.store, port=0, auth=cls.auth)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _login(self, emp_id, pw):
+        c = _Client(self.base)
+        c.login(emp_id, pw)
+        return c
+
+    def test_staff_cannot_assign(self):
+        c = self._login("emp-chen", "pw-chen")
+        _, sub = c.post("/api/task/submit", {"title": "员工提的任务"})
+        status, body = c.post("/api/task/assign", {"id": sub["id"], "to": "dev"})
+        self.assertEqual(status, 403)
+        # 员工可以提交
+        self.assertEqual(sub["state"], "pending")
+
+    def test_manager_assign_only_own_dept(self):
+        m = self._login("mgr-dev", "pw-mgr")
+        _, sub = m.post("/api/task/submit", {"title": "负责人提的任务"})
+        status, _ = m.post("/api/task/assign", {"id": sub["id"], "to": "dev"})
+        self.assertEqual(status, 200)          # 本部门 OK
+        _, sub2 = m.post("/api/task/submit", {"title": "再提一个"})
+        status, _ = m.post("/api/task/assign", {"id": sub2["id"], "to": "emp-wang"})
+        self.assertEqual(status, 403)          # 跨部门拒
+
+    def test_manager_accept_cross_dept_denied(self):
+        m = self._login("mgr-dev", "pw-mgr")
+        a = self._login("boss", "pw-boss")
+        _, sub = a.post("/api/task/submit", {"title": "财务任务"})
+        a.post("/api/task/assign", {"id": sub["id"], "to": "emp-wang"})
+        t = self.store.load_task(sub["id"])
+        advance(t, DOING, actor="emp-wang")
+        self.store.save_task(t)
+        status, _ = m.post("/api/task/accept", {"id": sub["id"], "score": 3})
+        self.assertEqual(status, 403)          # 承接人不在本部门
+
+    def test_approval_admin_only_and_ledger(self):
+        # 造一张待审批单
+        log = ApprovalLog(self.store)
+        req = ApprovalRequest(id="AP-test001", type="高危操作", risk="high",
+                              requester="dev", summary="删库")
+        log.log_request(req)
+        # staff 决策 → 403
+        c = self._login("emp-chen", "pw-chen")
+        status, _ = c.post("/api/approval/decide",
+                           {"id": "AP-test001", "approved": True})
+        self.assertEqual(status, 403)
+        # admin 决策 → 通过
+        a = self._login("boss", "pw-boss")
+        status, body = a.post("/api/approval/decide",
+                              {"id": "AP-test001", "approved": True, "opinion": "准"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "approved")
+        # 重复决策 → 404
+        status, _ = a.post("/api/approval/decide", {"id": "AP-test001", "approved": False})
+        self.assertEqual(status, 404)
+        # 账本：requester 记了人类介入
+        _, perf = a.get("/api/perf")
+        self.assertEqual(perf["dev"]["human_intervention_rate"], 1.0)
+
+    def test_approvals_visibility(self):
+        log = ApprovalLog(self.store)
+        log.log_request(ApprovalRequest(id="AP-vis001", type="高危操作",
+                                        risk="high", requester="emp-wang",
+                                        summary="测试可见性"))
+        c = self._login("emp-chen", "pw-chen")
+        status, mine = c.get("/api/approvals?status=pending")
+        self.assertEqual(status, 200)
+        self.assertEqual(mine, [])              # 别人的单看不到
+        a = self._login("boss", "pw-boss")
+        _, all_ = a.get("/api/approvals?status=pending")
+        ids = {e["id"] for e in all_}
+        self.assertIn("AP-vis001", ids)         # admin 全见
+
+    def test_perf_visibility(self):
+        # 给 dev 记一票账（走完整验收），再看 staff 视角是否看不到 dev
+        a = self._login("boss", "pw-boss")
+        _, sub = a.post("/api/task/submit", {"title": "绩效可见性"})
+        a.post("/api/task/assign", {"id": sub["id"], "to": "dev"})
+        t = self.store.load_task(sub["id"])
+        advance(t, DOING, actor="dev")
+        self.store.save_task(t)
+        a.post("/api/task/accept", {"id": sub["id"], "score": 4})
+        # staff 视角：不含 dev（只可能有自己的账）
+        c = self._login("emp-chen", "pw-chen")
+        _, perf = c.get("/api/perf")
+        self.assertNotIn("dev", perf)
+        # admin 视角：含 dev
+        _, perf = a.get("/api/perf")
+        self.assertIn("dev", perf)
+
+
+class TestAssignAuto(unittest.TestCase):
+    """快捷派发：pending 直达 assigned，中间流转留痕。"""
+
+    def test_pending_direct_assign(self):
+        st = _mk_free_store()
+        st.save_task(Task(id="T-A1", title="直派"))
+        t = assign_task_auto(st, "T-A1", "dev", actor="boss")
+        self.assertEqual(t.state, "assigned")
+        states = [log["to"] for log in t.flow_log]
+        self.assertEqual(states, ["triage", "planning", "review", "assigned"])
+        # 每步留痕
+        remarks = [log.get("remark", "") for log in t.flow_log]
+        self.assertIn("直派快捷", remarks[0])
+        # 入队
+        from laoban.core.workstation import queue_of
+        self.assertIn("T-A1", queue_of(st, "dev"))
+
+    def test_review_state_normal_assign(self):
+        st = _mk_free_store()
+        t = Task(id="T-R1", title="已评审")
+        for s in (TRIAGE, PLANNING, REVIEW):
+            advance(t, s, actor="pm")
+        st.save_task(t)
+        t2 = assign_task_auto(st, "T-R1", "dev", actor="boss")
+        self.assertEqual(t2.state, "assigned")
+        # 不重复走快捷流程
+        self.assertEqual(len(t2.flow_log), 4)
+
+    def test_assigned_task_reassign_raises(self):
+        st = _mk_free_store()
+        st.save_task(Task(id="T-D1", title="已派"))
+        assign_task_auto(st, "T-D1", "dev")
+        from laoban.core.state_machine import IllegalTransition
+        with self.assertRaises(IllegalTransition):
+            assign_task_auto(st, "T-D1", "dev")   # assigned 不能再派
+
+
+if __name__ == "__main__":
+    unittest.main()
