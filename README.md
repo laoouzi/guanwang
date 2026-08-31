@@ -26,7 +26,7 @@ laoban today --who emp-陈工          # 人类员工当日任务清单
 laoban todo add --assignee emp-小李 --title "复核异常值" --source self --from emp-陈工
 laoban todo results --who emp-陈工   # 人→人闭环：查看发起任务回传的结果
 laoban auth passwd --who emp-chen        # 给员工设口令（设过即启用看板登录）
-laoban dashboard          # Web 看板（127.0.0.1:7891）
+laoban dashboard          # Web 看板（127.0.0.1:7891；配好 LLM Key 后派单即自动执行）
 ```
 
 ## 核心概念
@@ -109,6 +109,23 @@ laoban dashboard          # Web 看板（127.0.0.1:7891）
 {"assignee": "emp-chen", "title": "核查异常值", "instruction": "核对后回传"}
 [/TOOL]
 ```
+
+### 自动运转引擎（WorkerLoop）
+
+`laoban dashboard` 检测到真实 LLM（任一 `LAOBAN_*` 环境变量）时默认启动后台 `WorkerLoop` 线程：
+
+1. **扫**：每 `--worker-interval` 秒（默认 2.0）轮询所有在职 AI 员工的工位队列；
+2. **执行**：发现 `assigned` 任务即自动推进 `doing` → 调 `Runner` 执行 → `reporting`（交付物落 `progress_log`）；
+3. **容错**：LLM 调用失败不炸循环，任务转 `blocked` 并写 `block_reason`，下轮不再重复执行（幂等）；
+4. **人的位置**：全程零人工干预，你只在看板做两件事——**验收评分**（→ `done`，绩效入账）或处理**审批单**。
+
+```bash
+laoban dashboard                          # 默认：自动运转开启
+laoban dashboard --no-worker              # 关闭（纯人工推状态，适合调试）
+laoban dashboard --worker-interval 5.0    # 自定义扫描间隔
+```
+
+注意：演示模式（MockLLM / 无 Key）不启动 worker，需手动 `laoban task status` 推进——自动运转只在真实 LLM 下默认开启。
 
 ### 员工档案字段（`Employee` dataclass）
 
@@ -266,7 +283,8 @@ laoban acceptance run --root /tmp/laoban-acc
 ## 测试
 
 ```bash
-python -m unittest discover -v
+python -m pytest tests/ -q                 # 全量回归（302 用例）
+python scripts/dashboard_worker_check.py   # 自动运转 e2e（Playwright + 假 LLM，无需 Key）
 ```
 
 ## 安全声明

@@ -147,6 +147,10 @@ def _build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--provider", default="",
                       help="聊天 LLM provider（deepseek/qwen/openai/kimi/ollama）；"
                            "默认自动发现 LAOBAN_* 环境变量，无则聊天不可用")
+    dash.add_argument("--no-worker", action="store_true",
+                      help="关闭自动运转引擎（派单后不自动执行，纯人工推状态）")
+    dash.add_argument("--worker-interval", type=float, default=2.0,
+                      help="自动运转引擎扫描间隔秒数（默认 2.0）")
 
     demo = sub.add_parser("demo", help="演示模式（MockLLM，无需 API Key）")
 
@@ -475,11 +479,22 @@ def main(argv: list[str] | None = None) -> int:
             print("未配置飞书（LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET），IM 渠道未启用")
         server = DashboardServer(st, port=args.port, gateway=gw,
                                  feishu=feishu_hook, auth=AuthStore(st.root))
+        # 自动运转引擎：有 LLM 即默认启动（--no-worker 关闭）
+        worker = None
+        if gw is not None and not args.no_worker:
+            from .runner.worker import WorkerLoop
+            worker = WorkerLoop(st, gw, interval=args.worker_interval)
+            worker.start()
+            print(f"自动运转已启用：派单后 AI 自动执行 → 汇报，等你在看板验收"
+                  f"（每 {args.worker_interval}s 扫一次队列；--no-worker 关闭）")
         print(f"看板已启动：http://127.0.0.1:{server.port}/ （Ctrl+C 退出）")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             print("\n看板已停止")
+        finally:
+            if worker:
+                worker.stop()
         return 0
 
     if cmd == "demo":
