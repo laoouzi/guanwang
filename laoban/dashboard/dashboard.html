@@ -132,15 +132,32 @@
     function setMe(me) {
       const info = document.getElementById('meInfo');
       const from = document.getElementById('chatFrom');
+      // 个人数据查询框：登录后按角色锁定（staff/manager 只能查自己相关）
+      const personal = ['msgWho', 'queueWho', 'who'];
+      const scoped = {   // role → 需要锁定为本人的查询框
+        staff: personal,               // 只能查自己的一切
+        manager: ['msgWho'],           // 消息只能查自己；队列/待办可查部门成员（API 层校验）
+        admin: [],
+      };
       if (me) {
+        const role = me.role || 'staff';
+        const badge = {admin: '管理员', manager: '部门负责人', staff: '员工'}[role] || role;
         info.textContent = `已登录：${me.name}（${me.id}${me.title ? ' · ' + me.title : ''}）`;
         info.insertAdjacentHTML('beforeend',
+          ` <span class="kind ${role === 'admin' ? 'ai' : 'human'}">${badge}</span>` +
+          (role !== 'admin' && me.department ? ` · 可见范围：${me.department}` : '') +
           ' <a href="#" onclick="doLogout();return false;">退出</a>');
         from.value = me.id;
         from.disabled = true;   // 登录后锁定身份，防手改
+        for (const id of personal) {
+          const el = document.getElementById(id);
+          el.value = (scoped[role] || personal).includes(id) ? me.id : el.value;
+          el.disabled = (scoped[role] || personal).includes(id);
+        }
       } else {
         info.textContent = '';
         from.disabled = false;
+        for (const id of personal) document.getElementById(id).disabled = false;
       }
     }
 
@@ -155,7 +172,8 @@
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { alert(`登录失败：${data.error || resp.status}`); return; }
       document.getElementById('loginPw').value = '';
-      setMe(data);
+      await loadMe();   // 以 /api/me 为权威（含 role/department），驱动角色徽章与输入框锁定
+      await load();     // 登录前数据接口 401 渲染为空，登录后带会话重拉全量
     }
 
     async function doLogout() {

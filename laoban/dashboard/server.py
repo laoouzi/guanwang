@@ -8,9 +8,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ..core.store import JsonStore
+from ..core.employee import Employee
 from ..core.human_inbox import HumanInbox
 from ..core.messenger import inbox as msg_inbox, sent as msg_sent
 from ..core.workstation import queue_of
+from . import rbac
 
 SESSION_COOKIE = "laoban_session"
 
@@ -68,6 +70,34 @@ class _Handler(BaseHTTPRequestHandler):
             return (403, f"只能以自己的身份发送（当前登录：{me}）")
         return None
 
+    # ---- 视图权限（RBAC-lite）----
+    def _view(self) -> tuple[str, object]:
+        """返回 (role, me)。免鉴权模式或未登录 → (admin, None)。
+
+        未登录且鉴权启用时 GET 数据接口一律 401（由 _require_view 统一处理）。
+        """
+        if not self.auth or not self.auth.enabled():
+            return rbac.ADMIN, None
+        emp_id = self._session_emp()
+        if not emp_id:
+            return "", None
+        emp = self.store.load_employee(emp_id)
+        if not emp:
+            return rbac.STAFF, None
+        return rbac.role_of(self.store, emp), emp
+
+    def _require_view(self):
+        """鉴权启用后 GET 数据必须登录。
+
+        返回 None = 通过；否则 (status, error, me, role) 元组的前两项。
+        """
+        role, me = self._view()
+        if not self.auth or not self.auth.enabled():
+            return None, (rbac.ADMIN, None)
+        if not me:
+            return (401, "请先登录后再查看数据"), (role, None)
+        return None, (role, me)
+
     def do_POST(self):
         u = urlparse(self.path)
         if u.path == "/api/login":
@@ -85,8 +115,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._error(401, "员工 id 或口令错误")
             token = uuid.uuid4().hex
             self.sessions[token] = emp_id
+            from . import rbac as _rbac
             body_ = json.dumps({"id": emp.id, "name": emp.name,
-                                "kind": emp.kind}, ensure_ascii=False).encode()
+                                "kind": emp.kind, "title": emp.title,
+                                "department": emp.department,
+                                "role": _rbac.role_of(self.store, emp)},
+                               ensure_ascii=False).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Set-Cookie",
@@ -166,31 +200,50 @@ class _Handler(BaseHTTPRequestHandler):
                 if not emp:
                     return self._error(401, "会话员工已不存在")
                 return self._json({"id": emp.id, "name": emp.name,
-                                   "kind": emp.kind, "title": emp.title})
+                                   "kind": emp.kind, "title": emp.title,
+                                   "department": emp.department,
+                                   "role": rbac.role_of(self.store, emp)})
             return self._json({"id": "", "name": "免鉴权模式",
-                               "kind": "", "title": "未设口令，无需登录"})
+                               "kind": "", "title": "未设口令，无需登录",
+                               "role": rbac.ADMIN})
+
+        # ---- 以下数据接口统一走视图权限（HTML 页面本身免登录，否则登录页打不开）----
+        if u.path.startswith("/api/"):
+            denied, (role, me) = self._require_view()
+            if denied:
+                return self._error(denied[0], denied[1])
+        else:
+            role, me = self._view()
+
         if u.path == "/api/tasks":
-            return self._json([t.to_dict() for t in self.store.list_tasks()])
+            return self._json([t.to_dict() for t in
+                               rbac.visible_tasks(self.store, me, role)])
         if u.path == "/api/employees":
-            return self._json([e.to_dict() for e in self.store.list_employees()])
+            return self._json(rbac.visible_employees(self.store, me, role))
         if u.path == "/api/org":
-            return self._json(self._org())
+            return self._json(self._org(role, me))
         if u.path == "/api/human-tasks":
             q = parse_qs(u.query)
             who = q.get("who", [""])[0]
             date = q.get("date", [datetime.date.today().isoformat()])[0]
+            if not rbac.can_view_human_tasks(self.store, me, role, who):
+                return self._error(403, "只能查看本人（或你管理部门成员）的待办")
             inbox = HumanInbox(self.store)
             return self._json([ht.to_dict() for ht in inbox.daily_list(assignee=who, date=date)])
         if u.path == "/api/human-results":
             # 人→人闭环：查看发起人收到的回传结果
             q = parse_qs(u.query)
             who = q.get("who", [""])[0]
+            if not rbac.can_view_results(self.store, me, role, who):
+                return self._error(403, "只能查看自己发起的回传结果")
             inbox = HumanInbox(self.store)
             return self._json([ht.to_dict() for ht in inbox.results_for(who)])
         if u.path == "/api/messages":
             who = self._who_required(u)
             if who is None:
                 return
+            if not rbac.can_view_messages(self.store, me, role, who):
+                return self._error(403, "只能查看自己的收发件箱")
             return self._json({
                 "inbox": msg_inbox(self.store, who),
                 "sent": msg_sent(self.store, who),
@@ -199,6 +252,8 @@ class _Handler(BaseHTTPRequestHandler):
             who = self._who_required(u)
             if who is None:
                 return
+            if not rbac.can_view_queue(self.store, me, role, who):
+                return self._error(403, "只能查看本人（或你管理部门成员）的队列")
             try:
                 task_ids = queue_of(self.store, who)
             except KeyError:
@@ -218,16 +273,33 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _org(self) -> list[dict]:
-        """组织架构视图：员工按部门分组（AI 与人类同部门）。"""
+    def _org(self, role: str = "", me=None) -> list[dict]:
+        """组织架构视图：员工按部门分组（AI 与人类同部门）。
+
+        可见员工与字段脱敏同花名册口径：staff 仅本部门，manager 跨部门脱敏，
+        admin 全量。
+        """
+        me = me or Employee(id="", name="")
+        role = role or rbac.ADMIN
+        members = rbac.dept_members(self.store, me) if me.id else set()
         departments: dict[str, dict] = {}
         for e in self.store.list_employees():
+            if role == rbac.MANAGER:
+                d = e.to_dict()
+            elif role == rbac.STAFF and e.id not in members:
+                continue
+            else:
+                d = e.to_dict()
+            if role != rbac.ADMIN:
+                full = (e.id == me.id) or (role == rbac.MANAGER
+                                           and e.department == me.department)
+                d = rbac.mask_employee(d, full)
             dept_id = e.department or "（未分配）"
-            d = departments.setdefault(dept_id, {"id": dept_id, "employees": []})
-            d["employees"].append({
-                "id": e.id, "name": e.name, "kind": e.kind,
-                "title": e.title, "status": e.status,
-                "queue": e.workspace.get("queue", []),
+            g = departments.setdefault(dept_id, {"id": dept_id, "employees": []})
+            g["employees"].append({
+                "id": d["id"], "name": d["name"], "kind": d["kind"],
+                "title": d["title"], "status": d["status"],
+                "queue": d.get("workspace", {}).get("queue", []),
             })
         return list(departments.values())
 
