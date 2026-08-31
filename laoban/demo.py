@@ -32,10 +32,10 @@ def run_demo() -> int:
             gw.register_mock(pid, MockLLM(responses=[f"[{pid}] 已完成本职工作"]))
 
     # ── 1. 启动模式：创始人入职（org.json 中 founder: true 的角色）──
-    print("【1】启动模式：三元老（HR / 法务 / IT）入职")
+    print("【1】启动模式：四元老（HR / 法务 / IT / 财务）入职")
     plan = bootstrap_org(store, gw, business="做跨境电商工具")
     print(f"    组织设计方案：{plan['组织设计方案']}")
-    for pid in ("hr", "legal", "it"):
+    for pid in ("hr", "legal", "it", "cfo"):
         print(f"    {pid} 建议：{plan[pid]}")
 
     # ── 2. 双轨招聘：业务团队按 org.json 配置入职（AI 与人类同部门）──

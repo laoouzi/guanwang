@@ -24,7 +24,7 @@ DEFAULT_TEMPLATE = Path(__file__).parent / "templates" / "default_org.json"
 
 _ROLE_KEY_MAP = {"model_config": "model"}
 _MERGE_FIELDS = ("job_description", "performance_goals", "capabilities",
-                 "model_config", "permissions")
+                 "model_config", "compensation", "permissions")
 
 
 def load_org(path: str | Path | None = None) -> dict[str, Any]:
@@ -83,6 +83,7 @@ def build_employee(dept: dict[str, Any], role: dict[str, Any]) -> Employee:
     emp.title = role.get("title", "")
     emp.department = dept["id"]
     emp.reports_to = role.get("reports_to", "")
+    emp.hired_at = role.get("hired_at") or _now_iso()
     for f in _MERGE_FIELDS:
         v = role.get(_ROLE_KEY_MAP.get(f, f))
         if isinstance(v, dict):
@@ -90,6 +91,11 @@ def build_employee(dept: dict[str, Any], role: dict[str, Any]) -> Employee:
             merged.update(v)
             setattr(emp, f, merged)
     return emp
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def instantiate(store: JsonStore, org: dict[str, Any],

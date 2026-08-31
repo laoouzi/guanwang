@@ -93,9 +93,16 @@ class OpenAICompatibleProvider:
         except (KeyError, IndexError) as e:
             raise ProviderError(f"LLM 响应缺少 choices：{body}") from e
 
+        # token 用量（OpenAI 协议 usage.total_tokens；缺失时按字符估算兜底）
+        usage = body.get("usage") or {}
+        usage_tokens = int(usage.get("total_tokens", 0) or 0)
+        if not usage_tokens:
+            usage_tokens = (len(payload) + len(str(msg.get("content", "")))) // 4
+
         return LLMResponse(
             content=msg.get("content", ""),
             tool_calls=msg.get("tool_calls", []) or [],
+            usage_tokens=usage_tokens,
         )
 
 

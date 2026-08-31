@@ -31,6 +31,10 @@ class Employee:
     model_config: dict[str, Any] = field(default_factory=lambda: {
         "provider": "mock", "model": "mock", "temperature": 0.3,
     })
+    compensation: dict[str, Any] = field(default_factory=lambda: {
+        "salary_monthly": 0.0,        # 人类月薪（元；成本折算用）
+        "cost_per_1k_tokens": 0.0,    # AI 每 1k token 成本（元；0=不计）
+    })
     permissions: dict[str, Any] = field(default_factory=lambda: {
         "collaboration": [],
         "can_assign_human_tasks": False,
@@ -59,6 +63,7 @@ class Employee:
             "performance_goals": self.performance_goals,
             "capabilities": self.capabilities,
             "model_config": self.model_config,
+            "compensation": self.compensation,
             "permissions": self.permissions,
             "memory": self.memory,
             "workspace": self.workspace,
@@ -71,7 +76,8 @@ class Employee:
             if k in d:
                 setattr(e, k, d[k])
         for k in ("job_description", "performance_goals", "capabilities",
-                  "model_config", "permissions", "memory", "workspace"):
+                  "model_config", "compensation", "permissions", "memory",
+                  "workspace"):
             if k in d and isinstance(d[k], dict):
                 # 合并默认值，确保新字段也有默认兜底
                 merged = dict(getattr(e, k))

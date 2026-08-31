@@ -10,19 +10,30 @@ from .store import JsonStore
 
 
 class Ledger:
-    """绩效账本：完成数 / 平均耗时 / 总成本 / 驳回率 / 人类介入率。"""
+    """绩效账本：完成数 / 平均耗时 / 总成本 / 驳回率 / 人类介入率 / 奖励积分。"""
 
     def __init__(self):
         self._completions: dict[str, list[dict[str, float]]] = defaultdict(list)
         self._rejections: dict[str, int] = defaultdict(int)
         self._steps: dict[str, int] = defaultdict(int)
         self._interventions: dict[str, int] = defaultdict(int)
+        self._points: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     def record_completion(self, emp_id: str, task_id: str = "", cost: float = 0.0, elapsed: float = 0.0) -> None:
         self._completions[emp_id].append({"cost": cost, "elapsed": elapsed})
 
     def record_rejection(self, emp_id: str) -> None:
         self._rejections[emp_id] += 1
+
+    def record_points(self, emp_id: str, delta: float, reason: str = "") -> None:
+        """记积分（正=奖励，负=扣分），每笔含原因可审计。"""
+        self._points[emp_id].append({"delta": delta, "reason": reason})
+
+    def points(self, emp_id: str) -> float:
+        return sum(p["delta"] for p in self._points.get(emp_id, []))
+
+    def points_log(self, emp_id: str) -> list[dict[str, Any]]:
+        return list(self._points.get(emp_id, []))
 
     def record_step(self, emp_id: str) -> None:
         self._steps[emp_id] += 1
@@ -48,6 +59,7 @@ class Ledger:
             "rejection_rate": rejection_rate,
             "rejection_count": rejections,
             "human_intervention_rate": intervention_rate,
+            "points": self.points(emp_id),
         }
 
 
@@ -75,6 +87,7 @@ class FileLedger(Ledger):
         self._rejections = defaultdict(int, d.get("rejections", {}))
         self._steps = defaultdict(int, d.get("steps", {}))
         self._interventions = defaultdict(int, d.get("interventions", {}))
+        self._points = defaultdict(list, {k: v for k, v in d.get("points", {}).items()})
 
     def _save(self) -> None:
         d = {
@@ -82,6 +95,7 @@ class FileLedger(Ledger):
             "rejections": dict(self._rejections),
             "steps": dict(self._steps),
             "interventions": dict(self._interventions),
+            "points": dict(self._points),
         }
         fd, tmp = tempfile.mkstemp(dir=self.store.root, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -104,8 +118,13 @@ class FileLedger(Ledger):
         super().record_human_intervention(emp_id, kind)
         self._save()
 
+    def record_points(self, emp_id: str, delta: float, reason: str = "") -> None:
+        super().record_points(emp_id, delta, reason)
+        self._save()
+
     def stats_all(self) -> dict[str, dict[str, Any]]:
         """全部有记录员工的统计（看板绩效面板用）。"""
         ids = (set(self._completions) | set(self._rejections)
-               | set(self._steps) | set(self._interventions))
+               | set(self._steps) | set(self._interventions)
+               | set(self._points))
         return {emp_id: self.stats(emp_id) for emp_id in ids}

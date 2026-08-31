@@ -43,12 +43,14 @@ laoban dashboard          # Web 看板（127.0.0.1:7891；配好 LLM Key 后派�
 | 任务状态机 | pending → triage → planning → review ⇄ 驳回(≤3 轮) → assigned → doing ⇄ waiting_human → reporting → done |
 | 权限矩阵 | 协作权限 / 工具权限 / 支出限额 / 自主等级（supervised/semi/full） |
 | 审批队列 | 高危操作 + 支出授权 + 编制申请统一审批单，容量/时间联合触发批量处理 |
-| 启动模式 | 创业三元老（HR/法务/IT）基于业务构想产出组织设计方案；组织结构由 `org.json` 配置驱动（v0.2） |
+| 启动模式 | 创业四元老（HR/法务/IT/财务）基于业务构想产出组织设计方案；组织结构由 `org.json` 配置驱动（v0.2） |
 | 双轨招聘 | 轨道 A：老板直招；轨道 B：部门负责人编制申请（新增 AI / 复制 AI / 招聘人类）→ 审批 → 入职；role 命中 `org.json` 岗位模板时自动套用模型/权限 |
 | 绩效账本 | 完成数 / 成本 / 驳回率 / **人类介入率**（衡量 AI 自主程度） |
 | 经验回写 | 人类验收评分（1-5）回写员工记忆，越用越懂你的业务 |
 | AI 复盘 | 评语为空或低分（≤2）时自动复盘：LLM 依据任务要求+交付物生成具体教训（失败降级模板），落 `memory.experiences`，下次执行注入 system prompt（教训排前）——真实链路验证：低分→复盘→重试交付质量改善 |
-| 晋升通道 | AI 员工连续 3 次验收通过 → 自动提交晋升申请（supervised→semi→full），老板审批后自主等级生效（低风险操作免审批）；被驳回需再攒 3 次通过才可重新申请 |
+| 奖励积分 | 人类与 AI **统一记分**：验收通过 +10×(评分/5)、驳回 -5，落盘 `ledger.json`；看板三榜（人类/AI 分榜 + ROI 统一榜）横向对比「谁干活好干活多」 |
+| 成本与 ROI | AI 按 token 单价、人类按时薪折算任务成本；ROI = 积分/累计成本（每元成本产出多少业绩），跨族群公平对比 |
+| 晋升通道 | **积分达标自动申请**：AI 达 30 分即可升自主等级（supervised→semi→full）；人类走年度评估（入职满一年 + 积分达 30 分）升部门负责人；老板审批后生效，驳回需再攒一档积分 |
 | 复盘报告 | 按部门聚合：完成数 / 驳回次数 / 教训数 / 自动复盘数 + 成员明细（最新教训、自主等级）；可见范围与绩效面板一致 |
 | 人类待办收件箱 | AI 超出能力时派发结构化人类待办（背景+目标+交付物格式+截止），完成后流程自动恢复 |
 
@@ -64,7 +66,8 @@ laoban dashboard          # Web 看板（127.0.0.1:7891；配好 LLM Key 后派�
 
 部门/岗位/权限全部配置化：`laoban org init-config` 生成 `.laoban/org.json`，
 编辑后 `laoban org load` 批量入职。未提供配置时使用内置默认模板
-（`laoban/templates/default_org.json`：5 部门 9 岗位，含三元老创始人）。
+（`laoban/templates/default_org.json`：6 部门 10 岗位，含 HR/法务/IT/财务
+四元老创始人——财务专家负责成本核算与 ROI 分析）。
 
 ```json
 {
@@ -91,9 +94,11 @@ laoban dashboard          # Web 看板（127.0.0.1:7891；配好 LLM Key 后派�
 ```
 
 规则：
-- 岗位字段 `model` / `job_description` / `performance_goals` / `capabilities` / `permissions`
+- 岗位字段 `model` / `job_description` / `performance_goals` / `capabilities` / `permissions` / `compensation`
   为**合并覆盖**（缺省字段用 `Employee` 默认值兜底）；
 - `founder: true` 的角色 = 启动模式创始人（`bootstrap` 只入职这些人）；
+- `compensation` 定成本：AI 配 `cost_per_1k_tokens`（token 单价），人类配 `salary_monthly`
+  （按时薪 = 月薪/22天/8小时折算），未配置者成本记 0（不虚造数据）；
 - 双轨招聘编制申请的 `role` 按**岗位 id 或 title** 命中模板时，新员工自动套用该岗位的
   模型/权限/职责（`kind` 以申请单为准）；
 - 配置查找顺序：显式 `--file` → `{root}/org.json` → 内置默认模板。
@@ -146,18 +151,51 @@ laoban dashboard --worker-interval 5.0    # 自定义扫描间隔
 # 任务2 同类重试 → 交付物干净（教训注入生效）
 ```
 
-### 晋升通道（表现好 → 自动申请升自主等级）
+### 奖励积分与成本产出比（人类/AI 统一记分）
 
-AI 员工连续 3 次验收通过（最近 3 条经验全 success）即自动提交晋升申请进审批队列，老板批准后 `autonomy_level` 立即生效——等级关系风险放行矩阵（supervised 全审批 / semi 放行 low / full 放行 low+medium），所以必须人工把关：
+记分规则（集中定义在 `laoban/core/points.py`，改规则只动一处）：
 
 ```
-验收通过 ×3 → 自动申请 supervised → semi → 老板批准 → 低风险操作免审批
-再通过 ×3   → 自动申请 semi → full     → 老板批准 → 中低风险全自主
+验收通过   +10 × (score/5)      # 满分 10 分、4 分 8 分、3 分 6 分
+验收驳回   -5                   # score ≤ 2 视为驳回（与复盘阈值一致）
+任务成本   AI: token用量 × cost_per_1k_tokens 单价（网关自动统计 usage）
+           人类: 任务耗时 × 时薪（salary_monthly / 22天 / 8小时）
+ROI        = 积分 / 累计成本     # 每元成本产出多少业绩
 ```
 
-- 一次升一级，full 封顶；已有 pending 申请不重复提；
-- 驳回有冷却：需再攒 3 条新 success 才可重新申请；
+榜单设计（避免不公平对比）：AI 吞任务速度天然碾压人类，绝对分榜会失真——
+所以看板 `GET /api/points` 出**三张榜**：
+
+| 榜 | 口径 | 用途 |
+|---|---|---|
+| 人类员工榜 | 积分降序 | 谁干活好干活多（部门/积分/完成数/驳回/累计成本） |
+| AI 员工榜 | 积分降序 | 同口径管 AI 团队 |
+| ROI 统一榜 | 积分/成本 降序 | 跨族群公平对比（AI 成本低是真实优势；未配成本单价者不入榜） |
+
+- 可见范围同绩效面板：admin 全量 / manager 本部门 / staff 仅本人；
+- 验收响应带 `points`（当前累计分）；成本在任务执行落 `progress_log`（token 用量 + 元），
+  验收时入账绩效账本；
+- 初创组织自带财务专家（CFO 钱掌柜）：统计各部门与员工成本、核算积分/成本产出比、
+  出具成本报告与预算建议。
+
+### 晋升通道（积分驱动 · 双轴晋升）
+
+**积分达标自动申请**，老板审批后生效（放权必须人工把关）：
+
+- **AI 员工 → 自主等级轴**：奖励积分达 30（≈3 次满分验收）即自动申请
+  supervised → semi → full；一次升一级，full 封顶；
+- **人类员工 → 管理权限轴**：**年度评估**（每年一次）——入职满一年
+  （`hired_at` 锚点，晋升后以 `last_promoted_at` 重置）且积分达 30，
+  自动申请 staff → manager，晋升即放权（可派单/验收/申请编制，RBAC 即时生效）；
+- 防重复：已有 pending 申请不重复提；已授予的目标不再申请；
+- 驳回冷却：被驳回后需再攒满一档晋升积分（申请时积分 + 30）才可重新申请；
 - 验收响应带 `promotion` 字段，看板提示「📈 晋升申请已自动提交」。
+
+```
+验收攒分 → 30 分达标
+  AI：   自动申请 semi/full（自主等级）      → 老板批准 → 风险放行范围扩大
+  人类： 年度评估（满一年）→ 自动申请 manager → 老板批准 → RBAC 权限即时生效
+```
 
 ### 复盘报告（GET /api/report）
 
@@ -194,6 +232,8 @@ POST /api/headcount/decide   仅 admin：通过 → HR 自动入职（返回 hir
 | `title` / `department` / `reports_to` | str | 岗位、部门、汇报上级 | `开发工程师`, `dev_dept` |
 | `source` | `founder` / `template` / `hired` / `cloned` | 入职来源 | `hired` |
 | `status` | `active` / `suspended` / `terminated` | 在职状态 | `active` |
+| `hired_at` | str | 入职时间（ISO，年度评估的年限锚点） | `2026-01-01T00:00:00+00:00` |
+| `compensation` | dict | 成本口径：AI `cost_per_1k_tokens`；人类 `salary_monthly`（时薪折算） | `{"cost_per_1k_tokens": 0.012}` |
 | `job_description` | dict | 核心职能：`mission` / `duties[]` / `workflow_rules[]` / `escalation` | - |
 | `performance_goals` | dict | 绩效目标：`max_concurrent` / `budget_daily_cost` / `quality_bar` | - |
 | `capabilities` | dict | 工作能力：`tools[]` / `skills[]` / `model_fit[]` | `{"tools": ["file_rw"]}` |

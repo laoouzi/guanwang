@@ -183,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         emp_id = args.id or f"emp-{args.name}"
         emp = Employee(id=emp_id, name=args.name, kind=args.kind, title=args.title,
                        department=args.department, reports_to=args.reports_to,
+                       hired_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                        workspace={"dir": f"workspaces/{emp_id}/"})
         st.save_employee(emp)
         kind_label = "人类员工" if emp.kind == "human" else "AI 员工"

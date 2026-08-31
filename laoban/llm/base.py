@@ -15,6 +15,7 @@ class Message:
 class LLMResponse:
     content: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    usage_tokens: int = 0    # 本次调用总 token 数（成本核算用；未知=0）
 
 
 class LLMProvider(Protocol):

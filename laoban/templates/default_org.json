@@ -63,6 +63,23 @@
       ]
     },
     {
+      "id": "fin_dept",
+      "name": "财务部",
+      "mission": "成本核算、ROI 分析与预算管控",
+      "roles": [
+        {
+          "id": "cfo",
+          "name": "钱掌柜",
+          "kind": "ai",
+          "title": "财务专家",
+          "founder": true,
+          "model": {"provider": "cfo", "model": "mock"},
+          "job_description": {"mission": "统计各部门与员工成本，核算积分/成本产出比，出具成本报告与预算建议"},
+          "permissions": {"autonomy_level": "semi"}
+        }
+      ]
+    },
+    {
       "id": "ops_dept",
       "name": "运营部",
       "mission": "任务分拣与项目推进",
@@ -100,6 +117,7 @@
           "model": {"provider": "dev", "model": "mock"},
           "job_description": {"mission": "按任务要求产出代码与数据交付物"},
           "capabilities": {"tools": ["python_exec", "file_write"]},
+          "compensation": {"cost_per_1k_tokens": 0.012},
           "permissions": {"can_assign_human_tasks": true, "autonomy_level": "semi", "spending_limit_per_task": 5.0}
         },
         {
@@ -108,6 +126,7 @@
           "kind": "human",
           "title": "数据核查员",
           "job_description": {"mission": "人工核查数据异常值"},
+          "compensation": {"salary_monthly": 12000},
           "permissions": {"can_assign_human_tasks": true}
         },
         {
@@ -115,7 +134,8 @@
           "name": "小李",
           "kind": "human",
           "title": "初级核查员",
-          "job_description": {"mission": "复核数据核查结果"}
+          "job_description": {"mission": "复核数据核查结果"},
+          "compensation": {"salary_monthly": 7000}
         }
       ]
     }

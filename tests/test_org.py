@@ -103,7 +103,7 @@ class TestInstantiate(unittest.TestCase):
         org = load_org()
         emps = instantiate(self.store, org, which="founders")
         ids = {e.id for e in emps}
-        self.assertEqual(ids, {"hr", "legal", "it"})
+        self.assertEqual(ids, {"hr", "legal", "it", "cfo"})
 
     def test_instantiate_team_only(self):
         org = load_org()
@@ -216,7 +216,7 @@ class TestCliOrg(unittest.TestCase):
             self.assertEqual(main(["org", "load", "--root", root,
                                    "--founders-only"]), 0)
             ids = {e.id for e in JsonStore(root).list_employees()}
-            self.assertEqual(ids, {"hr", "legal", "it"})
+            self.assertEqual(ids, {"hr", "legal", "it", "cfo"})
 
 
 if __name__ == "__main__":

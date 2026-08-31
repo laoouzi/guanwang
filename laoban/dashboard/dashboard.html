@@ -98,6 +98,21 @@
     <th>员工</th><th>完成数</th><th>总成本</th><th>平均耗时</th><th>驳回率</th><th>人类介入率</th>
   </tr></thead><tbody></tbody></table>
 
+  <h2 id="pointsSection">奖励积分榜（人类/AI 分榜 · ROI 统一对比）</h2>
+  <p id="ptsSummary" style="margin:4px 0 8px;font-weight:600"></p>
+  <div style="display:flex;gap:24px;flex-wrap:wrap">
+    <table id="ptsHuman"><thead><tr>
+      <th>人类员工</th><th>部门</th><th>积分</th><th>完成数</th><th>驳回</th><th>累计成本(元)</th>
+    </tr></thead><tbody></tbody></table>
+    <table id="ptsAI"><thead><tr>
+      <th>AI 员工</th><th>部门</th><th>积分</th><th>完成数</th><th>驳回</th><th>累计成本(元)</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+  <table id="ptsROI"><thead><tr>
+    <th>ROI 统一榜</th><th>族群</th><th>积分</th><th>累计成本(元)</th><th>每元成本产出积分</th>
+  </tr></thead><tbody></tbody></table>
+  <p id="ptsRules" class="empty" style="margin:4px 0 0"></p>
+
   <h2 id="reportSection">复盘报告（按部门）</h2>
   <table id="report"><thead><tr>
     <th>部门</th><th>完成数</th><th>驳回次数</th><th>教训数</th><th>自动复盘</th><th>成员明细</th>
@@ -183,6 +198,7 @@
       await loadApprovals();
       await loadHeadcount();
       await loadPerf();
+      await loadPoints();
       await loadReport();
     }
 
@@ -250,7 +266,7 @@
       el.textContent = ok ? (data.message || '操作成功')
                           : `⚠️ ${data.error || ('HTTP ' + status)}`;
       el.style.color = ok ? '#2a7a2a' : '#b33';
-      if (ok) { load(); loadApprovals(); loadPerf(); }
+      if (ok) { load(); loadApprovals(); loadPerf(); loadPoints(); }
     }
 
     async function submitTask() {
@@ -300,6 +316,11 @@
         const el = document.getElementById('opMsg');
         el.textContent += `\n📈 晋升申请已自动提交：${data.promotion.summary}（见审批队列）`;
         el.style.color = '#2a7a2a';
+      }
+      // 积分入账提示：统一记分，看积分榜横向对比
+      if (ok && data.points !== null && data.points !== undefined) {
+        const el = document.getElementById('opMsg');
+        el.textContent += `\n💰 ${data.assignee} 当前累计积分：${data.points}（见奖励积分榜）`;
       }
     }
 
@@ -391,6 +412,40 @@
           `<td>${s.total_cost.toFixed(2)}</td><td>${s.avg_elapsed.toFixed(1)}s</td>` +
           `<td>${pct(s.rejection_rate)}</td><td>${pct(s.human_intervention_rate)}</td></tr>`).join('')
         : '<tr><td colspan="6" class="empty">暂无绩效数据（验收/审批后记账）</td></tr>';
+    }
+
+    async function loadPoints() {
+      const resp = await fetch('/api/points');
+      if (!resp.ok) return;
+      const board = await resp.json();
+      const fmtPts = v => Number(v).toFixed(1);
+      const money = v => Number(v).toFixed(2);
+      const rows = list => list.map(r =>
+        `<tr><td>${esc(r.name || r.id)}</td><td>${esc(r.department || '')}</td>` +
+        `<td>${fmtPts(r.points)}</td><td>${r.completion_count}</td>` +
+        `<td>${r.rejection_count}</td><td>${money(r.total_cost)}</td></tr>`).join('');
+      document.querySelector('#ptsHuman tbody').innerHTML = board.human.length
+        ? rows(board.human)
+        : '<tr><td colspan="6" class="empty">暂无人类员工数据</td></tr>';
+      document.querySelector('#ptsAI tbody').innerHTML = board.ai.length
+        ? rows(board.ai)
+        : '<tr><td colspan="6" class="empty">暂无 AI 员工数据</td></tr>';
+      document.querySelector('#ptsROI tbody').innerHTML = board.roi.length
+        ? board.roi.map(r =>
+          `<tr><td>${esc(r.name || r.id)}</td><td>${r.kind === 'human' ? '人类' : 'AI'}</td>` +
+          `<td>${fmtPts(r.points)}</td><td>${money(r.total_cost)}</td>` +
+          `<td>${fmtPts(r.roi)}</td></tr>`).join('')
+        : '<tr><td colspan="5" class="empty">暂无 ROI 数据（需配置成本单价/薪资）</td></tr>';
+      // 财务报告卡片：可见范围内的总积分 / 总成本 / 整体 ROI
+      if (board.summary) {
+        const s = board.summary;
+        const roiText = s.roi === null ? '—（暂无成本数据）' : fmtPts(s.roi);
+        document.getElementById('ptsSummary').textContent =
+          `📊 财务速览（${s.scope}）：累计积分 ${fmtPts(s.total_points)} · ` +
+          `累计成本 ${money(s.total_cost)} 元 · 每元成本产出 ${roiText} 积分`;
+      }
+      document.getElementById('ptsRules').textContent =
+        `规则：${board.rules.note}（满分验收 +${board.rules.points_per_task}，驳回 -${board.rules.penalty_rejection}）`;
     }
 
     async function loadReport() {

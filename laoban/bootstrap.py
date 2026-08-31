@@ -23,7 +23,7 @@ def bootstrap_org(store: JsonStore, gateway: LLMGateway, business: str,
     """启动模式：按组织配置入职创始人，各自基于业务构想产出组织设计建议。
 
     配置来源：store 数据目录下 org.json（用户定制）优先，否则内置默认模板。
-    创始人即角色标 `founder: true` 的岗位（默认 HR/法务/IT 三元老），
+    创始人即角色标 `founder: true` 的岗位（默认 HR/法务/IT/财务 四元老），
     后续业务部门由组织设计方案审批后生成（v0.1 简化：仅产出建议文本，
     部门落地由双轨招聘承接）。
     """

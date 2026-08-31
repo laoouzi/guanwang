@@ -1,12 +1,13 @@
-"""员工晋升通道测试：连续验收通过 → 自动申请 → 老板审批 → 自主等级生效。
+"""AI 员工晋升通道测试（积分驱动）：验收攒分 → 达标自动申请 → 老板审批 → 等级生效。
 
 覆盖：
-- 触发条件：AI + 最近 3 条经验全 success + 当前等级可升；
-- 不触发：人类员工 / 经验不足 / 近期有 failure / 已 full；
+- 触发条件：AI + 奖励积分 ≥ PROMO_POINTS + 当前等级可升；
+- 不触发：积分不足 / 已 full；
 - 防重复：pending 不重复提；
-- 驳回冷却：需再攒 3 条新 success 才可重新申请；
+- 驳回冷却：需再攒满一档晋升积分（points_mark + PROMO_POINTS）；
 - apply_promotion：写回 autonomy_level；
-- 端点闭环：3 次高分验收 → 审批队列出现晋升申请 → admin 通过 → dev 升 semi。
+- 端点闭环：3 次满分验收（3×10=30 分）→ 审批队列出现晋升申请 →
+  admin 通过 → dev 升 semi → 继续攒分升 full → 封顶不再申请。
 """
 from __future__ import annotations
 
@@ -20,81 +21,92 @@ from laoban.core.task import Task
 from laoban.core.state_machine import advance
 from laoban.core.workstation import assign_task_auto
 from laoban.core.promotion import (maybe_request_promotion, apply_promotion,
-                                   PROMO_STREAK)
+                                   PROMO_POINTS)
+from laoban.core.ledger import FileLedger
 from laoban.runner.approval_log import ApprovalLog
 from laoban.dashboard.server import DashboardServer
 from tests.test_rbac import _mk_store, _Client
 
 
-def _emp(kind="ai", level=None, exps=None):
+def _emp(kind="ai", level=None):
     e = Employee(id="dev", name="阿码", kind=kind, department="dev_dept",
                  model_config={"provider": "p"})
     if level:
         e.permissions["autonomy_level"] = level
-    e.memory["experiences"] = exps or []
     return e
 
 
-def _succ(n):
-    return [{"outcome": "success", "learned": f"经验{i}"} for i in range(n)]
+def _ledger_with(store, emp_id="dev", points=PROMO_POINTS):
+    led = FileLedger(store)
+    if points:
+        led.record_points(emp_id, points, reason="测试预置积分")
+    return led
 
 
 class TestMaybeRequest(unittest.TestCase):
+    """积分驱动的 AI 晋升申请（ledger 供分）。"""
 
     def setUp(self):
         self.store = JsonStore(tempfile.mkdtemp())
         self.log = ApprovalLog(self.store)
 
-    def test_triggers_on_streak(self):
-        emp = _emp(exps=_succ(PROMO_STREAK))
-        r = maybe_request_promotion(self.store, emp, log=self.log)
+    def test_triggers_on_points(self):
+        emp = _emp()
+        led = _ledger_with(self.store, points=PROMO_POINTS)
+        r = maybe_request_promotion(self.store, emp, log=self.log, ledger=led)
         self.assertIsNotNone(r)
         self.assertEqual(r["target_level"], "semi")
+        self.assertEqual(r["points"], PROMO_POINTS)
         # 已落审批日志且 pending
         entries = self.log.list_logs(requester="dev")
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].request["status"], "pending")
         self.assertEqual(entries[0].request["type"], "晋升申请")
 
+    def test_insufficient_points(self):
+        emp = _emp()
+        led = _ledger_with(self.store, points=PROMO_POINTS - 0.5)
+        self.assertIsNone(
+            maybe_request_promotion(self.store, emp, log=self.log, ledger=led))
+
+    def test_no_ledger_no_promotion(self):
+        # 没有账本（无积分数据）不触发，避免误判
+        self.assertIsNone(
+            maybe_request_promotion(self.store, _emp(), log=self.log))
+
     def test_no_duplicate_while_pending(self):
-        emp = _emp(exps=_succ(PROMO_STREAK))
-        self.assertIsNotNone(maybe_request_promotion(self.store, emp, log=self.log))
-        self.assertIsNone(maybe_request_promotion(self.store, emp, log=self.log))
-
-    def test_human_never(self):
-        emp = _emp(kind="human", exps=_succ(5))
-        self.assertIsNone(maybe_request_promotion(self.store, emp, log=self.log))
-
-    def test_insufficient_experiences(self):
-        emp = _emp(exps=_succ(PROMO_STREAK - 1))
-        self.assertIsNone(maybe_request_promotion(self.store, emp, log=self.log))
-
-    def test_failure_breaks_streak(self):
-        exps = _succ(PROMO_STREAK)
-        exps[-1]["outcome"] = "failure"
-        emp = _emp(exps=exps)
-        self.assertIsNone(maybe_request_promotion(self.store, emp, log=self.log))
+        emp = _emp()
+        led = _ledger_with(self.store)
+        self.assertIsNotNone(
+            maybe_request_promotion(self.store, emp, log=self.log, ledger=led))
+        self.assertIsNone(
+            maybe_request_promotion(self.store, emp, log=self.log, ledger=led))
 
     def test_full_level_cap(self):
-        emp = _emp(level="full", exps=_succ(10))
-        self.assertIsNone(maybe_request_promotion(self.store, emp, log=self.log))
+        emp = _emp(level="full")
+        led = _ledger_with(self.store, points=PROMO_POINTS * 2)
+        self.assertIsNone(
+            maybe_request_promotion(self.store, emp, log=self.log, ledger=led))
 
     def test_reject_cooldown(self):
-        emp = _emp(exps=_succ(PROMO_STREAK))
-        r = maybe_request_promotion(self.store, emp, log=self.log)
+        emp = _emp()
+        led = _ledger_with(self.store)
+        r = maybe_request_promotion(self.store, emp, log=self.log, ledger=led)
         self.log.log_decision(r["id"], approver="boss", approved=False)
-        # 补 2 条仍不够（需 3+3=6 条）
-        emp.memory["experiences"].extend(_succ(2))
-        self.assertIsNone(maybe_request_promotion(self.store, emp, log=self.log))
-        # 补满第 3 条 → 可重新申请
-        emp.memory["experiences"].extend(_succ(1))
-        r2 = maybe_request_promotion(self.store, emp, log=self.log)
+        # 驳回后：积分仅多攒一点（仍 < 30+30）→ 冷却中
+        led.record_points("dev", 2, reason="再攒一点")
+        self.assertIsNone(
+            maybe_request_promotion(self.store, emp, log=self.log, ledger=led))
+        # 再攒满一档（30+30=60）→ 可重新申请
+        led.record_points("dev", 28, reason="攒满冷却分")
+        r2 = maybe_request_promotion(self.store, emp, log=self.log, ledger=led)
         self.assertIsNotNone(r2)
         self.assertEqual(r2["target_level"], "semi")
 
     def test_semi_promotes_to_full(self):
-        emp = _emp(level="semi", exps=_succ(PROMO_STREAK))
-        r = maybe_request_promotion(self.store, emp, log=self.log)
+        emp = _emp(level="semi")
+        led = _ledger_with(self.store)
+        r = maybe_request_promotion(self.store, emp, log=self.log, ledger=led)
         self.assertEqual(r["target_level"], "full")
 
 
@@ -105,7 +117,10 @@ class TestApplyPromotion(unittest.TestCase):
         st.save_employee(_emp())
         result = apply_promotion(st, {"requester": "dev", "target_level": "semi"})
         self.assertEqual(result["autonomy_level"], "semi")
-        self.assertEqual(st.load_employee("dev").permissions["autonomy_level"], "semi")
+        emp = st.load_employee("dev")
+        self.assertEqual(emp.permissions["autonomy_level"], "semi")
+        # 晋升时间落档（下次年度评估锚点）
+        self.assertTrue(emp.permissions["last_promoted_at"])
 
     def test_unknown_employee_or_level(self):
         st = JsonStore(tempfile.mkdtemp())
@@ -115,7 +130,7 @@ class TestApplyPromotion(unittest.TestCase):
 
 
 class TestPromotionEndpoint(unittest.TestCase):
-    """免鉴权端点闭环：3 次高分验收 → 晋升申请 → 通过 → 生效。"""
+    """免鉴权端点闭环：满分验收攒分 → 晋升申请 → 通过 → 生效 → 升满封顶。"""
 
     @classmethod
     def setUpClass(cls):
@@ -144,17 +159,18 @@ class TestPromotionEndpoint(unittest.TestCase):
                                 {"id": t.id, "score": score, "comment": comment})
 
     def test_full_promotion_loop(self):
-        # 1. 三次高分验收（评语非空 → success 经验）
-        for _ in range(3):
+        # 1. 三次满分验收（3×10=30 分达标）→ 第三次触发晋升申请
+        for i in range(3):
             status, body = self._accept_new_task(5)
             self.assertEqual(status, 200)
-        # 第三次触发晋升申请
-        status, body = self._last = self.client.get("/api/approvals")
-        promos = [a for a in body if a["type"] == "晋升申请"]
+            # 返回的是累计积分：10 → 20 → 30
+            self.assertAlmostEqual(body.get("points", 0.0), 10.0 * (i + 1))
+        status, body = self.client.get("/api/approvals")
+        promos = [a for a in body if a["type"] == "晋升申请"
+                  and a["status"] == "pending"]
         self.assertEqual(len(promos), 1)
         self.assertEqual(promos[0]["requester"], "dev")
         pid = promos[0]["id"]
-        self.assertEqual(promos[0]["status"], "pending")
 
         # 2. 员工等级尚未变（等审批）
         self.assertEqual(self.store.load_employee("dev")
@@ -169,10 +185,9 @@ class TestPromotionEndpoint(unittest.TestCase):
         self.assertEqual(self.store.load_employee("dev")
                          .permissions["autonomy_level"], "semi")
 
-        # 4. 再来 3 次高分 → 可申请 full
-        for _ in range(3):
-            status, _ = self._accept_new_task(5)
-            self.assertEqual(status, 200)
+        # 4. 再攒 30 分（累计 60）→ 可申请 full（积分累计即时触发，无需等 N 次）
+        status, _ = self._accept_new_task(5)
+        self.assertEqual(status, 200)
         status, body = self.client.get("/api/approvals")
         promos = [a for a in body if a["type"] == "晋升申请"
                   and a["status"] == "pending"]

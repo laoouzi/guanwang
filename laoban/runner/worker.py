@@ -86,6 +86,7 @@ class WorkerLoop:
             summary["result"] = f"跳过：{e}"
             return summary
 
+        started = time.time()
         try:
             deliverable = self.runner.run(emp, task)
         except Exception as e:   # LLM/网络等一切执行失败 → blocked（终态可见）
@@ -97,10 +98,18 @@ class WorkerLoop:
             print(f"[worker] {task.id} 执行失败转 blocked：{e!r}")
             return summary
 
+        # 成本核算：token 用量（读后清零）× 员工单价 → 验收时入账
+        usage = self.gateway.take_usage(
+            emp.model_config.get("provider", "mock"))
+        from ..core.points import accept_cost
         task.progress_log.append({
             "deliverable": deliverable,
             "by": emp.id,
             "at": task.updated_at,
+            "elapsed": round(time.time() - started, 1),
+            "usage_tokens": usage,
+            "cost": round(accept_cost(emp, elapsed_sec=time.time() - started,
+                                      usage_tokens=usage), 6),
         })
         advance(task, REPORTING, actor=emp.id,
                 remark=f"交付（自动，{len(deliverable)} 字）")

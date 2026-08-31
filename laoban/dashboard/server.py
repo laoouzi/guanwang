@@ -295,19 +295,39 @@ class _Handler(BaseHTTPRequestHandler):
                 review = review_and_learn(self.store, emp, task,
                                           score=score, comment=comment,
                                           gateway=self.gateway)
-                # 晋升通道：AI 升自主等级 / 人类升管理权限（老板审批）
+                self.store.save_employee(emp)
+            # 记账：完成（含交付落档的成本/耗时）+ 奖励积分
+            from ..core.points import (points_for_acceptance, PENALTY_REJECTION,
+                                       LOW_SCORE)
+            delivery = next((p for p in reversed(task.progress_log)
+                             if p.get("deliverable")), {})
+            cost = float(delivery.get("cost", 0.0) or 0.0)
+            elapsed = float(delivery.get("elapsed", 0.0) or 0.0)
+            self.ledger.record_completion(assignee, task_id=task_id,
+                                           cost=cost, elapsed=elapsed)
+            pts = points_for_acceptance(score)
+            reason = f"验收通过（{score}/5）：{task.title}"
+            if score <= LOW_SCORE:
+                # 低分 = 驳回回炉：记驳回账 + 扣分（与复盘阈值一致）
+                self.ledger.record_rejection(assignee)
+                pts = -PENALTY_REJECTION
+                reason = f"验收驳回（{score}/5）：{task.title}"
+            self.ledger.record_points(assignee, pts, reason=reason)
+            self.ledger.record_step(assignee)
+            # 晋升通道（积分入账后判定，本次验收即时生效）：
+            # AI 升自主等级 / 人类年度评估升管理权限（老板审批）
+            if emp:
                 from ..core.promotion import maybe_request_promotion
                 promotion = maybe_request_promotion(
                     self.store, emp,
-                    role=rbac.role_of(self.store, emp))
-                self.store.save_employee(emp)
-            self.ledger.record_completion(assignee, task_id=task_id)
-            self.ledger.record_step(assignee)
+                    role=rbac.role_of(self.store, emp),
+                    ledger=self.ledger)
         return self._json({"id": task.id, "state": task.state,
                            "assignee": assignee,
                            "message": f"任务已完成（评分 {score}/5）",
                            "review": review,
-                           "promotion": promotion})
+                           "promotion": promotion,
+                           "points": self.ledger.points(assignee) if assignee else None})
 
     def _op_approve(self, role: str, me, body: dict):
         """审批决策：仅 admin。落审批日志 + 账本记人类介入。"""
@@ -530,6 +550,32 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(reqs)
         if u.path == "/api/report":
             return self._json(self._report(role, me))
+        if u.path == "/api/points":
+            # 积分/ROI 榜：可见范围同绩效面板（admin 全量 / manager 本部门 / staff 本人）
+            from ..core.points import leaderboard
+            board = leaderboard(self.store, self.ledger)
+            if role == rbac.MANAGER and me is not None:
+                members = rbac.dept_members(self.store, me)
+                for k in ("ai", "human", "roi"):
+                    board[k] = [r for r in board[k] if r["id"] in members
+                                or r["id"] == me.id]
+            elif role == rbac.STAFF:
+                for k in ("ai", "human", "roi"):
+                    board[k] = [r for r in board[k]
+                                if me is not None and r["id"] == me.id]
+            # 财务报告汇总（对可见范围口径计算：总积分/总成本/整体 ROI）
+            rows = board["ai"] + board["human"]
+            total_pts = round(sum(r["points"] for r in rows), 2)
+            total_cost = round(sum(r["total_cost"] for r in rows), 4)
+            board["summary"] = {
+                "total_points": total_pts,
+                "total_cost": total_cost,
+                "roi": round(total_pts / total_cost, 2) if total_cost > 0 else None,
+                "scope": "全公司" if role == rbac.ADMIN else
+                         (me.department if me is not None and role == rbac.MANAGER
+                          else (me.name if me is not None else "")),
+            }
+            return self._json(board)
         if u.path == "/api/perf":
             # 绩效面板：admin 全公司；manager 本部门；staff 仅本人
             stats_all = self.ledger.stats_all()
