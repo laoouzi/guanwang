@@ -126,6 +126,26 @@ class TestChatReply(unittest.TestCase):
             chat_reply(self.store, self.gw, "emp-chen", "dev", "在吗")
 
 
+class TestChatFailureFallback(unittest.TestCase):
+    """D-4：LLM 执行失败也回信——不留「提问已送达却等不到回复」的半失败状态。"""
+
+    def test_llm_failure_replies_fallback(self):
+        class _FailingLLM:
+            def chat(self, messages, tools=None):
+                raise RuntimeError("LLM 服务不可用")
+
+        st = _mk_store()
+        gw = LLMGateway()
+        gw.register_provider("dev", _FailingLLM())
+        result = chat_reply(st, gw, "emp-chen", "dev", "在吗")
+        # 提问者收到明确回执（而非异常上抛 / 石沉大海）
+        self.assertIn("暂时无法回复", result["reply"])
+        chen_box = inbox(st, "emp-chen")
+        self.assertTrue(any("暂时无法回复" in m["content"] for m in chen_box))
+        # 提问本身也已投递（消息总线一致）
+        self.assertTrue(any(m["content"] == "在吗" for m in inbox(st, "dev")))
+
+
 class TestChatDashboardApi(unittest.TestCase):
     """D-3：看板 POST /api/chat（人从 Web 聊天框与 AI 对话）。"""
 

@@ -39,6 +39,12 @@ def chat_reply(store: JsonStore, gateway: LLMGateway, from_id: str,
             "请直接、简洁地回答该提问；本回复会作为消息回给对方。"
         ),
     )
-    answer = runner.run(target, reply_task).strip()
+    try:
+        answer = runner.run(target, reply_task).strip()
+    except Exception as e:
+        # 执行失败也回信：不留「提问已送达却永远等不到回复」的半失败状态
+        print(f"[chat] {to_id} 回复失败：{e!r}")
+        answer = (f"（{target.name} 暂时无法回复，请稍后重试或联系老板"
+                  f"｜原因：{str(e)[:80]}）")
     reply_msg = msg_send(store, to_id, from_id, answer)
     return {"question": question, "reply": answer, "reply_msg": reply_msg}

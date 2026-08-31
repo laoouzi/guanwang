@@ -128,6 +128,47 @@ class TestWorkerLoop(unittest.TestCase):
         # blocked 是终态：再 tick 不会重试（避免失败风暴）
         self.assertEqual(loop.tick(), [])
 
+    def test_llm_failure_dequeues_and_notifies_boss(self):
+        """blocked 死单善后：出队不占工位 + 站内信通知老板。"""
+        from laoban.core.messenger import inbox
+        st = _mk_store()
+        boss = Employee(id="boss", name="老板", kind="human")
+        boss.permissions["role"] = "admin"
+        st.save_employee(boss)
+        _assign(st, "T-F2")
+        gw = LLMGateway()
+        gw.register_provider("dev", _FailingLLM())
+        loop = WorkerLoop(st, gw)
+        loop.tick()
+        self.assertEqual(st.load_task("T-F2").state, "blocked")
+        # 出队：终态任务不再被反复扫描
+        self.assertNotIn("T-F2", queue_of(st, "dev"))
+        # 老板收到执行失败通知（escalation 确定性兜底）
+        box = inbox(st, "boss")
+        self.assertTrue(any("T-F2" in m["content"] and "执行失败" in m["content"]
+                            for m in box))
+
+    def test_reworked_task_reexecutes(self):
+        """驳回返工回炉的任务：回队列后 worker 再次自动执行。"""
+        st = _mk_store()
+        _assign(st, "T-RW")
+        loop = WorkerLoop(st, _mk_gw())
+        loop.tick()
+        self.assertEqual(st.load_task("T-RW").state, REPORTING)
+        # 模拟验收驳回返工（reporting → assigned，计 1 轮）
+        t = st.load_task("T-RW")
+        advance(t, ASSIGNED, actor="boss", remark="驳回返工")
+        st.save_task(t)
+        self.assertEqual(t.review_round, 1)
+        # 下一轮 tick 自动重做
+        results = loop.tick()
+        self.assertEqual(results, [{"task_id": "T-RW", "employee": "dev",
+                                    "result": "reporting"}])
+        t = st.load_task("T-RW")
+        self.assertEqual(t.state, REPORTING)
+        self.assertEqual(t.review_round, 1)        # 返工轮次保留
+        self.assertEqual(len(t.progress_log), 2)   # 两轮交付落档
+
     def test_thread_start_stop(self):
         st = _mk_store()
         _assign(st, "T-3")

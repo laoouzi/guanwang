@@ -11,9 +11,10 @@ from ..core.store import JsonStore
 from ..core.employee import Employee
 from ..core.human_inbox import HumanInbox
 from ..core.messenger import inbox as msg_inbox, sent as msg_sent
-from ..core.workstation import (queue_of, assign_task_auto, dequeue)
-from ..core.task import Task, DOING, REPORTING, DONE, HORIZONS, HORIZON_LABELS
-from ..core.state_machine import advance, IllegalTransition
+from ..core.workstation import (queue_of, assign_task_auto, dequeue, enqueue)
+from ..core.task import (Task, ASSIGNED, DOING, REPORTING, DONE,
+                         HORIZONS, HORIZON_LABELS)
+from ..core.state_machine import advance, IllegalTransition, MAX_REVIEW_ROUNDS
 from ..core.retro import review_and_learn
 from ..core.ledger import FileLedger
 from ..runner.approval_log import ApprovalLog
@@ -105,6 +106,23 @@ def _plans_view(store, who: str, role: str, me) -> dict:
                                 if total_all else 0.0),
         },
     }
+
+
+def _elapsed_since_assigned(task: Task) -> float:
+    """派单 → 现在的耗时（秒）：取 flow_log 最近一次流转到 assigned 的时刻。
+
+    找不到/不可解析返回 0（不虚造数据；成本口径为 0 = 未耗时）。
+    """
+    for entry in reversed(task.flow_log):
+        if entry.get("to") == ASSIGNED and entry.get("at"):
+            try:
+                dt = datetime.datetime.fromisoformat(
+                    entry["at"].replace("Z", "+00:00"))
+            except ValueError:
+                break
+            now = datetime.datetime.now(datetime.timezone.utc)
+            return max(0.0, now.timestamp() - dt.timestamp())
+    return 0.0
 
 
 def _parse_due(s: str) -> str:
@@ -294,7 +312,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         # ---- 任务操作 / 审批决策 / 编制申请（老板驾驶舱）----
         if u.path in ("/api/task/submit", "/api/task/assign",
-                      "/api/task/accept", "/api/approval/decide",
+                      "/api/task/accept", "/api/task/report",
+                      "/api/approval/decide",
                       "/api/headcount/submit", "/api/headcount/decide"):
             return self._handle_operation(u.path)
         return self._error(404, f"未知路径：{u.path}")
@@ -315,6 +334,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._op_assign(role, me, body)
             if path == "/api/task/accept":
                 return self._op_accept(role, me, body)
+            if path == "/api/task/report":
+                return self._op_report(role, me, body)
             if path == "/api/approval/decide":
                 return self._op_approve(role, me, body)
             if path == "/api/headcount/submit":
@@ -366,7 +387,13 @@ class _Handler(BaseHTTPRequestHandler):
                            "message": f"任务已派发给 {to}（已入工位队列）"})
 
     def _op_accept(self, role: str, me, body: dict):
-        """验收：DOING/REPORTING → DONE；评分回写记忆 + 账本记账 + 出队。"""
+        """验收：DOING/REPORTING → DONE；低分且未超返工上限 → 驳回返工回炉。
+
+        结案：评分回写记忆 + 账本记账 + 出队；返工：留队列等重做 +
+        复盘教训 + 驳回扣分（不记完成——没通过就不算交付）。
+        """
+        from ..core.points import (points_for_acceptance, on_time_points,
+                                   PENALTY_REJECTION, LOW_SCORE)
         task_id = str(body.get("id", "")).strip()
         if not task_id:
             return self._error(400, "缺少 id")
@@ -398,66 +425,151 @@ class _Handler(BaseHTTPRequestHandler):
         on_time = None   # 时效判定结果（None=无限期；无承接人时保持 None）
         if task.state == DOING:
             advance(task, REPORTING, actor=actor, remark="验收前汇报（看板）")
-        advance(task, DONE, actor=actor,
-                remark=f"验收通过（评分 {score}/5）{('：' + comment) if comment else ''}")
+
+        # 低分 = 驳回：未超返工上限且承接人在职 → 回炉重做；否则强制结案
+        emp = self.store.load_employee(assignee) if assignee else None
+        rework = (score <= LOW_SCORE
+                  and task.review_round < MAX_REVIEW_ROUNDS
+                  and emp is not None and emp.status == "active")
+        if rework:
+            advance(task, ASSIGNED, actor=actor,
+                    remark=f"驳回返工（评分 {score}/5）{('：' + comment) if comment else ''}")
+        else:
+            remark = (f"验收通过（评分 {score}/5）" if score > LOW_SCORE
+                      else f"驳回超限，强制结案（评分 {score}/5）")
+            advance(task, DONE, actor=actor,
+                    remark=f"{remark}{('：' + comment) if comment else ''}")
         self.store.save_task(task)
+
+        review = None
+        promotion = None
         if assignee:
-            dequeue(self.store, assignee, task_id)
-            # 复盘回写：评语为空或低分时自动生成教训（有 LLM 走 AI 复盘，
-            # 否则模板降级），下次执行经 render_experience 注入生效
-            emp = self.store.load_employee(assignee)
-            review = None
-            promotion = None
-            if emp:
-                review = review_and_learn(self.store, emp, task,
-                                          score=score, comment=comment,
-                                          gateway=self.gateway)
-                self.store.save_employee(emp)
-            # 记账：完成（含交付落档的成本/耗时）+ 奖励积分
-            from ..core.points import (points_for_acceptance, on_time_points,
-                                       PENALTY_REJECTION, LOW_SCORE)
-            delivery = next((p for p in reversed(task.progress_log)
-                             if p.get("deliverable")), {})
-            cost = float(delivery.get("cost", 0.0) or 0.0)
-            elapsed = float(delivery.get("elapsed", 0.0) or 0.0)
-            # 时效判定：完成时间（状态机落 updated_at）vs 截止时间
-            timing_pts = on_time_points(task.due_at, task.updated_at)
-            on_time = None if timing_pts is None else timing_pts > 0
-            self.ledger.record_completion(assignee, task_id=task_id,
-                                           cost=cost, elapsed=elapsed,
-                                           score=score, on_time=on_time)
-            pts = points_for_acceptance(score)
-            reason = f"验收通过（{score}/5）：{task.title}"
-            kind = "acceptance"
-            if score <= LOW_SCORE:
-                # 低分 = 驳回回炉：记驳回账 + 扣分（与复盘阈值一致）
+            if rework:
+                # 返工：回队列等重做（幂等）+ 复盘教训 + 驳回扣分
+                enqueue(self.store, assignee, task_id)
+                if emp:
+                    review = review_and_learn(self.store, emp, task,
+                                              score=score, comment=comment,
+                                              gateway=self.gateway)
+                    self.store.save_employee(emp)
                 self.ledger.record_rejection(assignee)
-                pts = -PENALTY_REJECTION
-                reason = f"验收驳回（{score}/5）：{task.title}"
-                kind = "rejection"
-            elif timing_pts is not None:
-                # 时效奖惩并入本次积分（通过才奖；驳回已经扣足）
-                pts += timing_pts
-                tag = "按时" if timing_pts > 0 else "超时"
-                reason += f"（{tag}）"
-            self.ledger.record_points(assignee, pts, reason=reason, kind=kind)
-            self.ledger.record_step(assignee)
-            # 晋升通道（积分入账后判定，本次验收即时生效）：
-            # AI 升自主等级 / 人类年度评估升管理权限（老板审批）
-            if emp:
-                from ..core.promotion import maybe_request_promotion
-                promotion = maybe_request_promotion(
-                    self.store, emp,
-                    role=rbac.role_of(self.store, emp),
-                    ledger=self.ledger)
-        timing_note = "" if on_time is None else ("（按时完成）" if on_time
-                                                  else "（超时完成）")
+                self.ledger.record_points(
+                    assignee, -PENALTY_REJECTION,
+                    reason=f"验收驳回（{score}/5）：{task.title}", kind="rejection")
+                self.ledger.record_step(assignee)
+            else:
+                dequeue(self.store, assignee, task_id)
+                # 出队已落盘：重载承接人，防止把旧队列（含本任务）回写覆盖
+                if emp:
+                    emp = self.store.load_employee(assignee)
+                # 复盘回写：评语为空或低分时自动生成教训（有 LLM 走 AI 复盘，
+                # 否则模板降级），下次执行经 render_experience 注入生效
+                if emp:
+                    review = review_and_learn(self.store, emp, task,
+                                              score=score, comment=comment,
+                                              gateway=self.gateway)
+                    self.store.save_employee(emp)
+                # 记账：完成（含交付落档的成本/耗时）+ 奖励积分
+                delivery = next((p for p in reversed(task.progress_log)
+                                 if p.get("deliverable")), {})
+                cost = float(delivery.get("cost", 0.0) or 0.0)
+                elapsed = float(delivery.get("elapsed", 0.0) or 0.0)
+                # 时效判定：完成时间（状态机落 updated_at）vs 截止时间
+                timing_pts = on_time_points(task.due_at, task.updated_at)
+                on_time = None if timing_pts is None else timing_pts > 0
+                self.ledger.record_completion(assignee, task_id=task_id,
+                                               cost=cost, elapsed=elapsed,
+                                               score=score, on_time=on_time)
+                pts = points_for_acceptance(score)
+                reason = f"验收通过（{score}/5）：{task.title}"
+                kind = "acceptance"
+                if score <= LOW_SCORE:
+                    # 超限强制结案：仍记驳回账 + 扣分（与复盘阈值一致）
+                    self.ledger.record_rejection(assignee)
+                    pts = -PENALTY_REJECTION
+                    reason = f"验收驳回（{score}/5）：{task.title}"
+                    kind = "rejection"
+                elif timing_pts is not None:
+                    # 时效奖惩并入本次积分（通过才奖；驳回已经扣足）
+                    pts += timing_pts
+                    tag = "按时" if timing_pts > 0 else "超时"
+                    reason += f"（{tag}）"
+                self.ledger.record_points(assignee, pts, reason=reason, kind=kind)
+                self.ledger.record_step(assignee)
+                # 晋升通道（积分入账后判定，本次验收即时生效）：
+                # AI 升自主等级 / 人类年度评估升管理权限（老板审批）
+                if emp:
+                    from ..core.promotion import maybe_request_promotion
+                    promotion = maybe_request_promotion(
+                        self.store, emp,
+                        role=rbac.role_of(self.store, emp),
+                        ledger=self.ledger)
+        if rework:
+            message = (f"已驳回返工（评分 {score}/5）：任务回到 {assignee} 队列重做"
+                       f"（第 {task.review_round}/{MAX_REVIEW_ROUNDS} 轮）")
+        else:
+            timing_note = "" if on_time is None else ("（按时完成）" if on_time
+                                                      else "（超时完成）")
+            message = f"任务已完成（评分 {score}/5）{timing_note}"
         return self._json({"id": task.id, "state": task.state,
                            "assignee": assignee,
-                           "message": f"任务已完成（评分 {score}/5）{timing_note}",
+                           "message": message,
                            "review": review,
                            "promotion": promotion,
                            "points": self.ledger.points(assignee) if assignee else None})
+
+    def _op_report(self, role: str, me, body: dict):
+        """人类员工汇报交付：ASSIGNED → DOING → REPORTING（等验收）。
+
+        AI 任务由 worker 自动执行，不走此口；人类任务由本人汇报
+        （manager 可代报本部门成员，admin 任意）。成本按派单 → 汇报的
+        耗时折算（时薪口径），验收时入账。
+        """
+        task_id = str(body.get("id", "")).strip()
+        deliverable = str(body.get("deliverable", "")).strip()
+        if not task_id:
+            return self._error(400, "缺少 id")
+        if not deliverable:
+            return self._error(400, "缺少 deliverable（交付说明）")
+        task = self.store.load_task(task_id)
+        if not task:
+            return self._error(404, f"任务不存在：{task_id}")
+        if task.state != ASSIGNED:
+            return self._error(409, f"当前状态 {task.state} 不可汇报（需 assigned）")
+        assignee = task.assignee
+        if not assignee:
+            return self._error(409, "任务未指派承接人，先派单")
+        emp = self.store.load_employee(assignee)
+        if not emp:
+            return self._error(404, f"承接人不存在：{assignee}")
+        if emp.kind == "ai":
+            return self._error(409, "AI 任务由系统自动执行，无需人工汇报")
+        # 权限：本人汇报；manager 可代报本部门（含自己）；admin 任意
+        if role == rbac.STAFF and (me is None or assignee != me.id):
+            return self._error(403, "只能汇报自己的任务")
+        if role == rbac.MANAGER and me is not None \
+                and assignee not in rbac.dept_members(self.store, me):
+            return self._error(403, "只能代报本部门成员的任务")
+
+        actor = self._actor(me)
+        elapsed = _elapsed_since_assigned(task)
+        advance(task, DOING, actor=actor, remark="开工（人类汇报）")
+        advance(task, REPORTING, actor=actor,
+                remark=f"交付（人类汇报，{len(deliverable)} 字）")
+        from ..core.points import accept_cost
+        task.progress_log.append({
+            "deliverable": deliverable,
+            "by": assignee,
+            "at": task.updated_at,
+            "elapsed": round(elapsed, 1),
+            "usage_tokens": 0,
+            "cost": round(accept_cost(emp, elapsed_sec=elapsed), 6),
+        })
+        self.store.save_task(task)
+        self.ledger.record_step(assignee)
+        return self._json({"id": task.id, "state": task.state,
+                           "assignee": assignee,
+                           "message": "已汇报交付，待验收（评分入账后完成）"})
 
     def _op_approve(self, role: str, me, body: dict):
         """审批决策：仅 admin。落审批日志 + 账本记人类介入。"""

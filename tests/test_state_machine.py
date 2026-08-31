@@ -42,6 +42,23 @@ class TestStateMachine(unittest.TestCase):
         with self.assertRaises(IllegalTransition):
             advance(t, PLANNING)
 
+    def test_reject_rework_returns_to_assigned(self):
+        """验收驳回返工：reporting → assigned，计入返工轮次。"""
+        t = Task(id="T-1", title="x", state=DOING)
+        advance(t, REPORTING)
+        advance(t, ASSIGNED, actor="boss", remark="驳回返工")
+        self.assertEqual(t.state, ASSIGNED)
+        self.assertEqual(t.review_round, 1)
+        # 回炉后可重新开工
+        advance(t, DOING)
+        advance(t, REPORTING)
+
+    def test_rework_beyond_max_rounds(self):
+        t = Task(id="T-1", title="x", state=REPORTING,
+                 review_round=MAX_REVIEW_ROUNDS)
+        with self.assertRaises(IllegalTransition):
+            advance(t, ASSIGNED)
+
     def test_waiting_human_roundtrip(self):
         t = Task(id="T-1", title="x", state=DOING)
         advance(t, WAITING_HUMAN)

@@ -271,6 +271,11 @@
         <input id="acceptComment" placeholder="验收意见（可选，会回写员工记忆）" style="width:30%" />
         <button class="vermilion" onclick="acceptTask()">验收</button>
       </p>
+      <p class="form-row" id="reportRow">
+        <input id="reportId" placeholder="任务 id（人类任务，assigned）" />
+        <input id="reportText" placeholder="交付说明（做了什么 / 结果在哪）" style="width:38%" />
+        <button onclick="reportTask()">汇报交付</button>
+      </p>
     </section>
 
     <section class="sheet" id="approvalSection">
@@ -584,6 +589,18 @@
         const el = document.getElementById('opMsg');
         el.textContent += `\n积分入账：${data.assignee} 当前累计积分 ${data.points}（见奖励积分榜）`;
       }
+    }
+
+    async function reportTask() {
+      const id = document.getElementById('reportId').value.trim();
+      const deliverable = document.getElementById('reportText').value.trim();
+      if (!id || !deliverable) { alert('请填写任务 id 与交付说明'); return; }
+      const { ok, data, status } = await opPost('/api/task/report', { id, deliverable });
+      if (ok) {
+        document.getElementById('reportId').value = '';
+        document.getElementById('reportText').value = '';
+      }
+      opFeedback(ok, data, status);
     }
 
     async function decideApproval(id, approved) {

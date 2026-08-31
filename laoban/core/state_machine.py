@@ -16,7 +16,8 @@ _VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     ASSIGNED: frozenset({DOING}),
     DOING: frozenset({REPORTING, WAITING_HUMAN}),
     WAITING_HUMAN: frozenset({DOING}),
-    REPORTING: frozenset({DONE}),
+    # ASSIGNED = 验收驳回返工（回炉重做，计入 review_round 上限）
+    REPORTING: frozenset({DONE, ASSIGNED}),
 }
 
 
@@ -37,6 +38,10 @@ def can_transition(
         if task.review_round >= max_review_rounds:
             return False, f"驳回超限（最多 {max_review_rounds} 轮）"
         return True, "驳回"
+    if task.state == REPORTING and to_state == ASSIGNED:
+        if task.review_round >= max_review_rounds:
+            return False, f"驳回返工超限（最多 {max_review_rounds} 轮）"
+        return True, "驳回返工"
     if to_state not in _VALID_TRANSITIONS.get(task.state, frozenset()):
         return False, f"非法转换 {task.state} -> {to_state}"
     return True, "合法"
@@ -52,7 +57,8 @@ def advance(
     ok, reason = can_transition(task, to_state, max_review_rounds)
     if not ok:
         raise IllegalTransition(reason)
-    if task.state == REVIEW and to_state == PLANNING:
+    if (task.state == REVIEW and to_state == PLANNING) or \
+            (task.state == REPORTING and to_state == ASSIGNED):
         task.review_round += 1
     task.flow_log.append({
         "at": utcnow(),

@@ -126,6 +126,88 @@ class TestOpsFreeAuth(unittest.TestCase):
         dev = self.store.load_employee("dev")
         self.assertEqual(dev.memory["experiences"][-1]["outcome"], "failure")
 
+    def test_low_score_reworks_task(self):
+        """低分驳回（未超限）：任务回炉 assigned 等重做，不记完成、扣驳回分。"""
+        from laoban.core.workstation import queue_of
+        _, perf0 = self.client.get("/api/perf")
+        base_done = perf0.get("dev", {}).get("completion_count", 0)
+        _, sub = self.client.post("/api/task/submit", {"title": "返工任务"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "dev"})
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="dev")
+        self.store.save_task(t)
+        status, body = self.client.post("/api/task/accept", {"id": tid, "score": 1})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["state"], "assigned")   # 回炉而非结案
+        self.assertIn("驳回返工", body["message"])
+        # 任务留在队列（等重做），返工轮次已计
+        self.assertIn(tid, queue_of(self.store, "dev"))
+        self.assertEqual(self.store.load_task(tid).review_round, 1)
+        # 不记完成（没通过不算交付），记驳回
+        _, perf = self.client.get("/api/perf")
+        self.assertEqual(perf["dev"]["completion_count"], base_done)
+        self.assertGreaterEqual(perf["dev"]["rejection_count"], 1)
+
+    def test_rework_exceeds_rounds_force_closes(self):
+        """返工超限（3 轮）：再驳回即强制结案，任务出队。"""
+        from laoban.core.workstation import queue_of
+        _, sub = self.client.post("/api/task/submit", {"title": "多次返工"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "dev"})
+        for _ in range(3):   # 三轮返工
+            t = self.store.load_task(tid)
+            advance(t, DOING, actor="dev")
+            self.store.save_task(t)
+            status, body = self.client.post("/api/task/accept", {"id": tid, "score": 1})
+            self.assertEqual(status, 200)
+            self.assertEqual(body["state"], "assigned")
+        self.assertEqual(self.store.load_task(tid).review_round, 3)
+        # 第四轮低分：超限 → 强制结案
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="dev")
+        self.store.save_task(t)
+        status, body = self.client.post("/api/task/accept", {"id": tid, "score": 1})
+        self.assertEqual(body["state"], "done")
+        self.assertNotIn(tid, queue_of(self.store, "dev"))
+
+    def test_human_report_flow(self):
+        """人类任务汇报：assigned → reporting，之后验收闭环打通。"""
+        _, sub = self.client.post("/api/task/submit", {"title": "人工核查"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "emp-chen"})
+        status, body = self.client.post(
+            "/api/task/report",
+            {"id": tid, "deliverable": "已核对 200 行数据，3 处异常已修正"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["state"], "reporting")
+        # 交付物落档（验收成本口径取最新一条）
+        t = self.store.load_task(tid)
+        self.assertEqual(t.progress_log[-1]["by"], "emp-chen")
+        self.assertIn("3 处异常", t.progress_log[-1]["deliverable"])
+        # 验收闭环（人类任务也能验收了）
+        status, body = self.client.post("/api/task/accept", {"id": tid, "score": 5})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["state"], "done")
+
+    def test_report_rejects_ai_task(self):
+        """AI 任务不走人工汇报口（由 worker 自动执行）。"""
+        _, sub = self.client.post("/api/task/submit", {"title": "AI 任务"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "dev"})
+        status, _ = self.client.post("/api/task/report",
+                                     {"id": tid, "deliverable": "x"})
+        self.assertEqual(status, 409)
+
+    def test_report_rejects_bad_state(self):
+        _, sub = self.client.post("/api/task/submit", {"title": "未派单"})
+        status, _ = self.client.post("/api/task/report",
+                                     {"id": sub["id"], "deliverable": "x"})
+        self.assertEqual(status, 409)   # pending 不可汇报
+        status, _ = self.client.post("/api/task/report",
+                                     {"id": "X", "deliverable": "x"})
+        self.assertEqual(status, 404)
+
     def test_file_ledger_persists(self):
         """记账后新 server 实例（模拟重启）能读到旧账。"""
         # 本测试自证：先走一遍完整验收产生账目
@@ -235,6 +317,36 @@ class TestOpsRbac(unittest.TestCase):
         _, all_ = a.get("/api/approvals?status=pending")
         ids = {e["id"] for e in all_}
         self.assertIn("AP-vis001", ids)         # admin 全见
+
+    def test_staff_report_only_own_task(self):
+        """人类汇报权限：staff 只能报自己的；manager 可代报本部门成员。"""
+        a = self._login("boss", "pw-boss")
+        _, own = a.post("/api/task/submit", {"title": "给陈工"})
+        a.post("/api/task/assign", {"id": own["id"], "to": "emp-chen"})
+        _, other = a.post("/api/task/submit", {"title": "给王姐"})
+        a.post("/api/task/assign", {"id": other["id"], "to": "emp-wang"})
+        # staff 报别人的任务 → 403
+        c = self._login("emp-chen", "pw-chen")
+        status, _ = c.post("/api/task/report",
+                           {"id": other["id"], "deliverable": "代报"})
+        self.assertEqual(status, 403)
+        # 报自己的 → 200
+        status, body = c.post("/api/task/report",
+                              {"id": own["id"], "deliverable": "陈工已完成"})
+        self.assertEqual(status, 200)
+        # manager 代报本部门成员（小李）→ 200
+        _, xiaoli = a.post("/api/task/submit", {"title": "给小李"})
+        a.post("/api/task/assign", {"id": xiaoli["id"], "to": "emp-xiaoli"})
+        m = self._login("mgr-dev", "pw-mgr")
+        status, _ = m.post("/api/task/report",
+                           {"id": xiaoli["id"], "deliverable": "代小李报"})
+        self.assertEqual(status, 200)
+        # manager 代报跨部门（王姐）→ 403
+        _, wang2 = a.post("/api/task/submit", {"title": "再给王姐"})
+        a.post("/api/task/assign", {"id": wang2["id"], "to": "emp-wang"})
+        status, _ = m.post("/api/task/report",
+                           {"id": wang2["id"], "deliverable": "越权代报"})
+        self.assertEqual(status, 403)
 
     def test_perf_visibility(self):
         # 给 dev 记一票账（走完整验收），再看 staff 视角是否看不到 dev

@@ -21,9 +21,27 @@ from ..core.employee import Employee
 from ..core.store import JsonStore
 from ..core.task import Task, ASSIGNED, DOING, REPORTING, BLOCKED
 from ..core.state_machine import advance, IllegalTransition
+from ..core.workstation import dequeue
 from ..core.ledger import FileLedger
 from ..llm.gateway import LLMGateway
 from .runner import Runner
+
+
+def _notify_boss_blocked(store: JsonStore, emp: Employee,
+                         task: Task, err: str) -> None:
+    """blocked 任务站内信通知老板（admin）：提示词里的 escalation 落到确定性管道。"""
+    try:
+        boss = next((e for e in store.list_employees()
+                     if e.status == "active"
+                     and e.permissions.get("role") == "admin"), None)
+        if boss is None:
+            return
+        from ..core.messenger import send
+        send(store, emp.id, boss.id,
+             f"【执行失败】任务 {task.id}「{task.title}」自动执行失败转 blocked：{err}。"
+             "请人工处理或重新提交任务。", task_id=task.id)
+    except Exception:
+        pass   # 通知失败不影响主流程（blocked 状态本身已可见）
 
 
 class WorkerLoop:
@@ -116,6 +134,10 @@ class WorkerLoop:
             advance(task, BLOCKED, actor="worker",
                     remark=task.block_reason)
             self.store.save_task(task)
+            # 死单善后：出队（终态任务不再占工位被反复扫描）+
+            # 站内信通知老板（escalation 的确定性兜底，失败不打断主流程）
+            dequeue(self.store, emp.id, task.id)
+            _notify_boss_blocked(self.store, emp, task, str(e))
             summary["result"] = f"blocked：{e}"
             print(f"[worker] {task.id} 执行失败转 blocked：{e!r}")
             return summary
