@@ -75,6 +75,24 @@
     <th>ID</th><th>类型</th><th>风险</th><th>发起人</th><th>摘要</th><th>状态</th><th>操作</th>
   </tr></thead><tbody></tbody></table>
 
+  <h2 id="headcountSection">编制申请（扩编/招聘）</h2>
+  <p id="hcFormRow">
+    <select id="hcType">
+      <option value="new_ai">新增 AI 员工</option>
+      <option value="clone_ai">复制现有 AI</option>
+      <option value="hire_human">招聘人类员工</option>
+    </select>
+    <input id="hcRole" placeholder="岗位 id（命中 org.json 模板则套用）" style="width:18%" />
+    <input id="hcDept" placeholder="部门" style="width:8%" />
+    <input id="hcSource" placeholder="复制源员工 id（仅复制时）" style="width:14%" />
+    <input id="hcCount" type="number" value="1" min="1" style="width:5%" />
+    <input id="hcReason" placeholder="申请理由（必填）" style="width:30%" />
+    <button onclick="submitHeadcount()">提交申请</button>
+  </p>
+  <table id="headcount"><thead><tr>
+    <th>ID</th><th>类型</th><th>岗位/来源</th><th>人数</th><th>发起人</th><th>理由</th><th>状态</th><th>操作</th>
+  </tr></thead><tbody></tbody></table>
+
   <h2 id="perfSection">绩效面板</h2>
   <table id="perf"><thead><tr>
     <th>员工</th><th>完成数</th><th>总成本</th><th>平均耗时</th><th>驳回率</th><th>人类介入率</th>
@@ -158,6 +176,7 @@
       await loadOrg();
       await loadMe();
       await loadApprovals();
+      await loadHeadcount();
       await loadPerf();
     }
 
@@ -198,12 +217,15 @@
         const canManage = role === 'admin' || role === 'manager';
         document.getElementById('assignRow').style.display = canManage ? '' : 'none';
         document.getElementById('acceptRow').style.display = canManage ? '' : 'none';
+        // 编制申请表单：仅 manager/admin 可提交（staff 无部门管理权）
+        document.getElementById('hcFormRow').style.display = canManage ? '' : 'none';
       } else {
         info.textContent = '';
         from.disabled = false;
         for (const id of personal) document.getElementById(id).disabled = false;
         document.getElementById('assignRow').style.display = '';
         document.getElementById('acceptRow').style.display = '';
+        document.getElementById('hcFormRow').style.display = '';
       }
     }
 
@@ -269,6 +291,58 @@
                                                 { id, approved, opinion });
       opFeedback(ok, data, status);
     }
+
+    // ---- 编制申请（部门负责人提交，老板审批通过即自动入职）----
+    async function submitHeadcount() {
+      const reason = document.getElementById('hcReason').value.trim();
+      if (!reason) { alert('请填写申请理由'); return; }
+      const payload = {
+        hire_type: document.getElementById('hcType').value,
+        role: document.getElementById('hcRole').value.trim(),
+        department: document.getElementById('hcDept').value.trim(),
+        source_emp_id: document.getElementById('hcSource').value.trim(),
+        headcount: parseInt(document.getElementById('hcCount').value, 10) || 1,
+        reason,
+      };
+      const { ok, data, status } = await opPost('/api/headcount/submit', payload);
+      if (ok) document.getElementById('hcReason').value = '';
+      opFeedback(ok, data, status);
+      if (ok) loadHeadcount();
+    }
+
+    async function decideHeadcount(id, approved) {
+      const reason = approved ? '' : (prompt('驳回理由（可空）：') || '');
+      const { ok, data, status } = await opPost('/api/headcount/decide',
+                                                { id, approved, reason });
+      opFeedback(ok, data, status);
+      if (ok) { loadHeadcount(); load(); }   // 通过后花名册会多一人
+    }
+
+    async function loadHeadcount() {
+      const resp = await fetch('/api/headcount');
+      if (!resp.ok) {
+        document.querySelector('#headcount tbody').innerHTML = '';
+        return;
+      }
+      const rows = await resp.json();
+      const me = window._me || {};
+      const isAdmin = (me.role || 'admin') === 'admin';
+      const TYPE_LABEL = { new_ai: '新增 AI', clone_ai: '复制 AI', hire_human: '招人类' };
+      document.querySelector('#headcount tbody').innerHTML = rows.length ? rows.map(r => {
+        const pending = r.status === 'pending';
+        const ops = pending && isAdmin
+          ? `<button onclick="decideHeadcount('${esc(r.id)}', true)">通过入职</button> ` +
+            `<button onclick="decideHeadcount('${esc(r.id)}', false)">驳回</button>`
+          : esc(r.status === 'rejected' ? (r.reject_reason || '已驳回') :
+                 r.status === 'approved' ? (r.hired_emp_id || '已入职') : '-');
+        const roleSrc = r.hire_type === 'clone_ai'
+          ? `复制 ${esc(r.source_emp_id)}` : esc(r.role || '-');
+        return `<tr><td>${esc(r.id)}</td><td>${esc(TYPE_LABEL[r.hire_type] || r.hire_type)}</td>` +
+               `<td>${roleSrc}</td><td>${esc(r.headcount)}</td><td>${esc(r.requester)}</td>` +
+               `<td>${esc(r.reason)}</td><td>${esc(r.status)}</td><td>${ops}</td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">暂无编制申请</td></tr>';
+    }
+
 
     async function loadApprovals() {
       const resp = await fetch('/api/approvals');

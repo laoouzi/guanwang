@@ -41,6 +41,34 @@ def get_request(store: JsonStore, req_id: str) -> dict | None:
     return store._read_json(_req_path(store, req_id))
 
 
+def list_requests(store: JsonStore) -> list[dict]:
+    """全部编制申请（最新在前）。"""
+    d = store.root / "headcount_requests"
+    if not d.exists():
+        return []
+    reqs = []
+    for p in d.glob("*.json"):
+        req = store._read_json(p)
+        if req:
+            reqs.append(req)
+    return sorted(reqs, key=lambda r: r.get("id", ""), reverse=True)
+
+
+def reject_headcount(store: JsonStore, req_id: str, approver: str,
+                     reason: str = "") -> dict:
+    """老板驳回 → 状态 rejected（记录驳回理由）。"""
+    req = get_request(store, req_id)
+    if not req:
+        raise KeyError(f"编制申请不存在：{req_id}")
+    if req["status"] != "pending":
+        raise ValueError(f"申请已处理（status={req['status']}），不可重复决策")
+    req["status"] = "rejected"
+    req["approver"] = approver
+    req["reject_reason"] = reason
+    store._atomic_write(_req_path(store, req_id), req)
+    return req
+
+
 def approve_headcount(store: JsonStore, req_id: str, approver: str) -> Employee:
     """老板审批通过 → HR 执行入职，返回新员工。"""
     req = get_request(store, req_id)

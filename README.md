@@ -47,6 +47,7 @@ laoban dashboard          # Web 看板（127.0.0.1:7891；配好 LLM Key 后派�
 | 双轨招聘 | 轨道 A：老板直招；轨道 B：部门负责人编制申请（新增 AI / 复制 AI / 招聘人类）→ 审批 → 入职；role 命中 `org.json` 岗位模板时自动套用模型/权限 |
 | 绩效账本 | 完成数 / 成本 / 驳回率 / **人类介入率**（衡量 AI 自主程度） |
 | 经验回写 | 人类验收评分（1-5）回写员工记忆，越用越懂你的业务 |
+| AI 复盘 | 评语为空或低分（≤2）时自动复盘：LLM 依据任务要求+交付物生成具体教训（失败降级模板），落 `memory.experiences`，下次执行注入 system prompt（教训排前）——真实链路验证：低分→复盘→重试交付质量改善 |
 | 人类待办收件箱 | AI 超出能力时派发结构化人类待办（背景+目标+交付物格式+截止），完成后流程自动恢复 |
 
 ## 架构
@@ -126,6 +127,35 @@ laoban dashboard --worker-interval 5.0    # 自定义扫描间隔
 ```
 
 注意：演示模式（MockLLM / 无 Key）不启动 worker，需手动 `laoban task status` 推进——自动运转只在真实 LLM 下默认开启。
+
+### AI 复盘机制（验收 → 教训 → 下次生效）
+
+验收是员工成长的入口：`review_and_learn`（`laoban/core/retro.py`）在验收时自动回写经验——
+
+1. **触发**：老板留了评语且 score≥3 → learned = 评语（现状）；评语为空或低分（≤2）→ 自动复盘；
+2. **生成**：有 LLM 网关且承接人是 AI → 把任务要求 + 交付物 + 评分喂给该员工自己的模型，产出 ≤60 字具体教训；LLM 失败/无网关 → 模板教训降级，**复盘永不缺席**；
+3. **生效**：教训落 `memory.experiences`（`auto` 标记可审计），下次执行经 `render_experience` 注入 system prompt——**低分教训排最前**，success 经验跟后，各取最近 5 条防 token 膨胀；
+4. **响应可见**：验收接口返回 `review` 字段，看板可直接展示复盘结论。
+
+```
+# 真实链路验证（Kimi）：
+# 任务1 回文函数 → 交付物被历史对话污染 → 低分验收（无评语）
+#   → AI 复盘自动诊断：「交付物混入了无关内容，下次交付前逐行审查」
+# 任务2 同类重试 → 交付物干净（教训注入生效）
+```
+
+### 编制申请看板化（双轨招聘 · 轨道 B 闭环）
+
+部门负责人在驾驶舱直接扩编，老板一键决策：
+
+```
+POST /api/headcount/submit   manager/admin 提交（hire_type: new_ai / clone_ai / hire_human）
+GET  /api/headcount          admin 全量；manager/staff 仅自己提交的
+POST /api/headcount/decide   仅 admin：通过 → HR 自动入职（返回 hired_emp_id）；驳回 → 记理由
+```
+
+- 通过后花名册即时 +1（role 命中 `org.json` 模板自动套用；clone_ai 生成源员工分身）；
+- 重复决策 409 拦截；员工列表随角色收权（staff 看不到表单与决策按钮）。
 
 ### 员工档案字段（`Employee` dataclass）
 

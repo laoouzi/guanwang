@@ -6,7 +6,7 @@ from laoban.core.task import Task
 from laoban.core.employee import Employee
 from laoban.llm.gateway import LLMGateway
 from laoban.llm.base import Message
-from laoban.core.memory import recall
+from laoban.core.memory import render_experience
 
 from .collab_tools import build_collab_tools, parse_tool_blocks
 
@@ -48,8 +48,9 @@ class Runner:
         system = (
             f"你是 {employee.name}（{employee.title or '员工'}）。"
             f"岗位职责：{employee.job_description.get('mission', '')}。"
-            f"经验记忆：{recall(employee)}。"
-            "请基于任务要求产出可交付结果，严格遵守任务中的输出格式约定。"
+            "\n过往经验（验收复盘沉淀，先吸取教训再动手）：\n"
+            f"{render_experience(employee)}"
+            "\n请基于任务要求产出可交付结果，严格遵守任务中的输出格式约定。"
         )
         if self.store is not None:
             from laoban.core.directory import render_directory

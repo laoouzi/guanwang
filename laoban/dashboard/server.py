@@ -14,7 +14,7 @@ from ..core.messenger import inbox as msg_inbox, sent as msg_sent
 from ..core.workstation import (queue_of, assign_task_auto, dequeue)
 from ..core.task import Task, DOING, REPORTING, DONE
 from ..core.state_machine import advance, IllegalTransition
-from ..core.feedback import write_back_experience
+from ..core.retro import review_and_learn
 from ..core.ledger import FileLedger
 from ..runner.approval_log import ApprovalLog
 from . import rbac
@@ -186,9 +186,10 @@ class _Handler(BaseHTTPRequestHandler):
             status, payload = self.feishu.handle(self._read_body())
             return self._json(payload, status)
 
-        # ---- 任务操作 / 审批决策（老板驾驶舱）----
+        # ---- 任务操作 / 审批决策 / 编制申请（老板驾驶舱）----
         if u.path in ("/api/task/submit", "/api/task/assign",
-                      "/api/task/accept", "/api/approval/decide"):
+                      "/api/task/accept", "/api/approval/decide",
+                      "/api/headcount/submit", "/api/headcount/decide"):
             return self._handle_operation(u.path)
         return self._error(404, f"未知路径：{u.path}")
 
@@ -210,6 +211,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._op_accept(role, me, body)
             if path == "/api/approval/decide":
                 return self._op_approve(role, me, body)
+            if path == "/api/headcount/submit":
+                return self._op_headcount_submit(role, me, body)
+            if path == "/api/headcount/decide":
+                return self._op_headcount_decide(role, me, body)
         except KeyError as e:
             return self._error(404, str(e))
         except ValueError as e:
@@ -281,17 +286,21 @@ class _Handler(BaseHTTPRequestHandler):
         self.store.save_task(task)
         if assignee:
             dequeue(self.store, assignee, task_id)
-            # 经验回写：低分记 failure，高分记 success
+            # 复盘回写：评语为空或低分时自动生成教训（有 LLM 走 AI 复盘，
+            # 否则模板降级），下次执行经 render_experience 注入生效
             emp = self.store.load_employee(assignee)
+            review = None
             if emp:
-                write_back_experience(emp, task_type=task.title,
-                                      score=score, comment=comment)
+                review = review_and_learn(self.store, emp, task,
+                                          score=score, comment=comment,
+                                          gateway=self.gateway)
                 self.store.save_employee(emp)
             self.ledger.record_completion(assignee, task_id=task_id)
             self.ledger.record_step(assignee)
         return self._json({"id": task.id, "state": task.state,
                            "assignee": assignee,
-                           "message": f"任务已完成（评分 {score}/5）"})
+                           "message": f"任务已完成（评分 {score}/5）",
+                           "review": review})
 
     def _op_approve(self, role: str, me, body: dict):
         """审批决策：仅 admin。落审批日志 + 账本记人类介入。"""
@@ -317,6 +326,52 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json({"id": log_id,
                            "status": "approved" if approved else "rejected",
                            "message": "已通过" if approved else "已驳回"})
+
+    def _op_headcount_submit(self, role: str, me, body: dict):
+        """提交编制申请：manager/admin（staff 无部门管理权，不可提）。"""
+        if role == rbac.STAFF:
+            return self._error(403, "仅部门负责人及以上可提交编制申请")
+        from ..recruitment import submit_headcount_request, HIRE_TYPES
+        reason = str(body.get("reason", "")).strip()
+        if not reason:
+            return self._error(400, "缺少 reason（申请理由）")
+        hire_type = str(body.get("hire_type", "new_ai")).strip()
+        if hire_type not in HIRE_TYPES:
+            return self._error(400, f"hire_type 必须是 {HIRE_TYPES} 之一")
+        try:
+            headcount = int(body.get("headcount", 1))
+            cost = float(body.get("cost", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return self._error(400, "headcount/cost 必须是数字")
+        req = submit_headcount_request(
+            self.store, requester=self._actor(me), reason=reason,
+            headcount=headcount, role=str(body.get("role", "")).strip(),
+            cost=cost, hire_type=hire_type,
+            department=str(body.get("department", "")).strip(),
+            source_emp_id=str(body.get("source_emp_id", "")).strip())
+        return self._json({"id": req["id"], "status": "pending",
+                           "message": f"编制申请已提交：{req['id']}（等老板审批）"})
+
+    def _op_headcount_decide(self, role: str, me, body: dict):
+        """编制申请决策：仅 admin。通过即入职（HR 自动执行），驳回记理由。"""
+        if role != rbac.ADMIN:
+            return self._error(403, "仅管理员可决策编制申请")
+        from ..recruitment import approve_headcount, reject_headcount
+        req_id = str(body.get("id", "")).strip()
+        if not req_id:
+            return self._error(400, "缺少 id")
+        approved = bool(body.get("approved", False))
+        reason = str(body.get("reason", "")).strip()
+        if approved:
+            emp = approve_headcount(self.store, req_id,
+                                    approver=self._actor(me))
+            return self._json({
+                "id": req_id, "status": "approved", "hired_emp_id": emp.id,
+                "message": f"已通过并完成入职：{emp.name}（{emp.id}）"})
+        req = reject_headcount(self.store, req_id, approver=self._actor(me),
+                               reason=reason)
+        return self._json({"id": req_id, "status": "rejected",
+                           "message": f"已驳回{('：' + reason) if reason else ''}"})
 
     def _who_required(self, u) -> str | None:
         who = parse_qs(u.query).get("who", [""])[0]
@@ -414,6 +469,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "status": e.request.get("status", "pending"),
                 "approver": e.approver, "opinion": e.opinion,
             } for e in logs])
+        if u.path == "/api/headcount":
+            # 编制申请：admin 全部；manager/staff 仅自己提交的
+            from ..recruitment import list_requests
+            reqs = list_requests(self.store)
+            if role != rbac.ADMIN and me is not None:
+                reqs = [r for r in reqs if r.get("requester") == me.id]
+            return self._json(reqs)
         if u.path == "/api/perf":
             # 绩效面板：admin 全公司；manager 本部门；staff 仅本人
             stats_all = self.ledger.stats_all()
