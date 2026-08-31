@@ -39,6 +39,7 @@ class WorkerLoop:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.last_results: list[dict] = []   # 最近一轮执行摘要（审计/调试）
+        self._finance_week = ""              # CFO 周报周 key 缓存（跨周才查归档）
 
     # ---- 主循环 ----
     def run_forever(self) -> None:
@@ -62,8 +63,12 @@ class WorkerLoop:
 
     # ---- 单轮 ----
     def tick(self) -> list[dict]:
-        """扫一遍全部 AI 员工队列，执行 assigned 任务。返回执行摘要。"""
+        """扫一遍全部 AI 员工队列，执行 assigned 任务。返回执行摘要。
+
+        附带：每周首次 tick 触发 CFO 周报（幂等，归档去重）。
+        """
         results: list[dict] = []
+        self._maybe_weekly_finance()
         for emp in self.store.list_employees():
             if emp.kind != "ai" or emp.status != "active":
                 continue
@@ -74,6 +79,23 @@ class WorkerLoop:
                 results.append(self._execute(emp, task))
         self.last_results = results
         return results
+
+    def _maybe_weekly_finance(self) -> None:
+        """CFO 周报触发：ISO 周变化时检查一次（归档幂等，重复调用安全）。"""
+        from datetime import datetime, timezone
+        from ..core.finance import maybe_generate_weekly_report, week_key
+        key = week_key(datetime.now(timezone.utc))
+        if key == self._finance_week:
+            return
+        self._finance_week = key
+        try:
+            report = maybe_generate_weekly_report(
+                self.store, self.ledger, gateway=self.gateway)
+            if report:
+                print(f"[worker] CFO 周报已生成：{report['period']['key']}"
+                      "（财务卡片 / GET /api/finance 可查）")
+        except Exception as e:
+            print(f"[worker] CFO 周报生成失败：{e!r}")
 
     def _execute(self, emp: Employee, task: Task) -> dict:
         """单个任务：assigned → doing → Runner → reporting（或 blocked）。"""

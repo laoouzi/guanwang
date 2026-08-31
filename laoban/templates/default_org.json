@@ -1,6 +1,13 @@
 {
   "company": "老板科技有限公司",
   "business": "跨境电商工具",
+  "points": {
+    "points_per_task": 10,
+    "penalty_rejection": 5,
+    "low_score": 2,
+    "bonus_on_time": 2,
+    "penalty_late": 2
+  },
   "departments": [
     {
       "id": "hr_dept",

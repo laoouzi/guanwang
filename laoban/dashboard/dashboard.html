@@ -123,6 +123,9 @@
   </tr></thead><tbody></tbody></table>
   <p id="ptsRules" class="empty" style="margin:4px 0 0"></p>
 
+  <h2 id="financeSection">CFO 周报（成本 / 积分 / ROI · 按周归档）</h2>
+  <div id="finCard" class="empty" style="margin:4px 0 0">加载中…</div>
+
   <h2 id="reportSection">复盘报告（按部门）</h2>
   <table id="report"><thead><tr>
     <th>部门</th><th>完成数</th><th>驳回次数</th><th>教训数</th><th>自动复盘</th><th>成员明细</th>
@@ -222,6 +225,7 @@
       await loadHeadcount();
       await loadPerf();
       await loadPoints();
+      await loadFinance();
       await loadPlans();
       await loadReport();
     }
@@ -483,6 +487,58 @@
         `规则：${board.rules.note}（满分验收 +${board.rules.points_per_task}，` +
         `驳回 -${board.rules.penalty_rejection}，按时 +${board.rules.bonus_on_time}，` +
         `超时 -${board.rules.penalty_late}）`;
+    }
+
+    async function loadFinance() {
+      const card = document.getElementById('finCard');
+      const resp = await fetch('/api/finance');
+      if (resp.status === 403) {
+        card.className = '';
+        card.innerHTML = '<p class="empty">财务周报仅老板可见</p>';
+        return;
+      }
+      if (!resp.ok) return;
+      const fin = await resp.json();
+      card.className = '';
+      if (!fin.current) {
+        card.innerHTML = '<p class="empty">暂无周报（每周首次自动运转时由 CFO 生成并归档）</p>';
+        return;
+      }
+      const r = fin.current, c = r.company;
+      const fmtPts = v => Number(v).toFixed(1);
+      const money = v => Number(v).toFixed(2);
+      const pctOrDash = v => v === null || v === undefined ? '—' : (v * 100).toFixed(0) + '%';
+      // 环比行：delta>0 ↑ / <0 ↓ / =0 →，有 pct 带百分比
+      const cmpCell = (label, cell) => {
+        if (!cell) return `<span class="msg-meta">${label}：—</span>`;
+        const icon = cell.delta === 0 ? '→' : (cell.delta > 0 ? '↑' : '↓');
+        const pctTxt = cell.pct !== undefined ? `（${cell.pct}%）` : '';
+        return `<span class="msg-meta">${label}：${icon} ${fmtPts(Math.abs(cell.delta))}${pctTxt}</span>`;
+      };
+      const deptRows = (r.departments || []).map(d =>
+        `<tr><td>${esc(d.department)}</td><td>${fmtPts(d.points)}</td>` +
+        `<td>${money(d.cost)}</td><td>${d.roi === null || d.roi === undefined ? '—' : fmtPts(d.roi)}</td>` +
+        `<td>${d.completion_count}</td><td>${d.rejection_count}</td>` +
+        `<td>${esc(d.members.map(m => m.name).join('、'))}</td></tr>`).join('');
+      const history = (fin.history || []).slice().reverse().slice(0, 8).map(h =>
+        `<span class="msg-meta">${h.key}:积分${fmtPts(h.points)}/成本${money(h.cost)}/完成${h.completion_count}</span>`
+      ).join('　');
+      card.innerHTML =
+        `<p style="margin:4px 0"><b>📅 ${r.period.key}</b>` +
+        `<span class="msg-meta">（${r.period.start.slice(0, 10)} ~ ${r.period.end.slice(0, 10)} · ` +
+        `由 ${esc(r.generated_by)} 生成）</span></p>` +
+        `<p style="margin:4px 0;font-weight:600">积分 ${fmtPts(c.points)} · 成本 ${money(c.cost)} 元 · ` +
+        `每元成本产出 ${c.roi === null || c.roi === undefined ? '—' : fmtPts(c.roi)} 积分 · ` +
+        `完成 ${c.completion_count} 项（驳回 ${c.rejection_count}，按时 ${c.due ? pctOrDash(c.on_time / c.due) : '—'}）</p>` +
+        (r.compare ? `<p style="margin:4px 0">环比上周（${r.compare.period}）：` +
+          cmpCell('积分', r.compare.points) + '　' +
+          cmpCell('成本', r.compare.cost) + '　' +
+          cmpCell('完成', r.compare.completion_count) + '</p>' : '') +
+        (deptRows ? `<table><thead><tr>
+          <th>部门</th><th>积分</th><th>成本(元)</th><th>ROI</th><th>完成</th><th>驳回</th><th>成员</th>
+        </tr></thead><tbody>${deptRows}</tbody></table>` : '') +
+        `<p style="margin:8px 0 2px">💡 CFO 建议：${esc(r.budget_advice || '—')}</p>` +
+        (history ? `<p style="margin:2px 0">往期：${history}</p>` : '');
     }
 
     const SOURCE_LABELS = {assigned: '被动分配', self: '个人计划', unassigned: '未指派'};

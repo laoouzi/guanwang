@@ -428,17 +428,19 @@ class _Handler(BaseHTTPRequestHandler):
                                            score=score, on_time=on_time)
             pts = points_for_acceptance(score)
             reason = f"验收通过（{score}/5）：{task.title}"
+            kind = "acceptance"
             if score <= LOW_SCORE:
                 # 低分 = 驳回回炉：记驳回账 + 扣分（与复盘阈值一致）
                 self.ledger.record_rejection(assignee)
                 pts = -PENALTY_REJECTION
                 reason = f"验收驳回（{score}/5）：{task.title}"
+                kind = "rejection"
             elif timing_pts is not None:
                 # 时效奖惩并入本次积分（通过才奖；驳回已经扣足）
                 pts += timing_pts
                 tag = "按时" if timing_pts > 0 else "超时"
                 reason += f"（{tag}）"
-            self.ledger.record_points(assignee, pts, reason=reason)
+            self.ledger.record_points(assignee, pts, reason=reason, kind=kind)
             self.ledger.record_step(assignee)
             # 晋升通道（积分入账后判定，本次验收即时生效）：
             # AI 升自主等级 / 人类年度评估升管理权限（老板审批）
@@ -716,6 +718,25 @@ class _Handler(BaseHTTPRequestHandler):
                           else (me.name if me is not None else "")),
             }
             return self._json(board)
+        if u.path == "/api/finance":
+            # CFO 周报（归档读取）：财务数据敏感，仅老板（admin）可见。
+            # 返回 current=最新一期（含环比 compare 与 budget_advice），
+            # history=各期公司级摘要（升序）。
+            from ..core.finance import load_reports
+            if role != rbac.ADMIN:
+                return self._error(403, "财务周报仅老板可见")
+            reports = load_reports(self.store)
+            history = [{
+                "key": r.get("period", {}).get("key", ""),
+                "points": r.get("company", {}).get("points", 0),
+                "cost": r.get("company", {}).get("cost", 0),
+                "roi": r.get("company", {}).get("roi"),
+                "completion_count": r.get("company", {}).get("completion_count", 0),
+            } for r in reports]
+            return self._json({
+                "current": reports[-1] if reports else None,
+                "history": history,
+            })
         if u.path == "/api/perf":
             # 绩效面板：admin 全公司；manager 本部门；staff 仅本人
             stats_all = self.ledger.stats_all()

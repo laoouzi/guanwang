@@ -23,6 +23,30 @@ BONUS_ON_TIME = 2.0        # 按时完成奖励（有截止的任务）
 PENALTY_LATE = 2.0         # 超时完成扣分（有截止的任务）
 
 
+def configure(config: dict | None) -> dict:
+    """用 org.json 的 points 段覆盖默认积分规则（进程级生效，幂等可重复调）。
+
+    支持键：points_per_task / penalty_rejection / low_score /
+    bonus_on_time / penalty_late（缺省沿用当前值）。返回生效后的规则快照。
+    模块内计分函数读全局常量，configure 后立即生效。
+    """
+    global POINTS_PER_TASK, PENALTY_REJECTION, LOW_SCORE
+    global BONUS_ON_TIME, PENALTY_LATE
+    if isinstance(config, dict) and config:
+        POINTS_PER_TASK = float(config.get("points_per_task", POINTS_PER_TASK))
+        PENALTY_REJECTION = float(config.get("penalty_rejection", PENALTY_REJECTION))
+        LOW_SCORE = int(config.get("low_score", LOW_SCORE))
+        BONUS_ON_TIME = float(config.get("bonus_on_time", BONUS_ON_TIME))
+        PENALTY_LATE = float(config.get("penalty_late", PENALTY_LATE))
+    return {
+        "points_per_task": POINTS_PER_TASK,
+        "penalty_rejection": PENALTY_REJECTION,
+        "low_score": LOW_SCORE,
+        "bonus_on_time": BONUS_ON_TIME,
+        "penalty_late": PENALTY_LATE,
+    }
+
+
 def points_for_acceptance(score: int) -> float:
     """验收通过积分：满分 10，按评分线性折算（0.5 步进）。"""
     return round(POINTS_PER_TASK * max(0, min(5, score)) / 5 * 2) / 2
@@ -105,9 +129,12 @@ def leaderboard(store: JsonStore, ledger) -> dict:
         "rules": {
             "points_per_task": POINTS_PER_TASK,
             "penalty_rejection": PENALTY_REJECTION,
+            "low_score": LOW_SCORE,
             "bonus_on_time": BONUS_ON_TIME,
             "penalty_late": PENALTY_LATE,
-            "note": "验收通过 +10×(评分/5)；驳回 -5；有截止任务按时 +2、超时 -2；"
+            "note": f"验收通过 +{POINTS_PER_TASK:g}×(评分/5)；"
+                    f"评分≤{LOW_SCORE} 驳回 -{PENALTY_REJECTION:g}；"
+                    f"有截止任务按时 +{BONUS_ON_TIME:g}、超时 -{PENALTY_LATE:g}；"
                     "ROI = 积分/累计成本（AI 按 token 单价、人类按时薪折算）",
         },
     }

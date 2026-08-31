@@ -4,14 +4,30 @@ import json
 import os
 import tempfile
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 
 from .store import JsonStore
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_ts(s: str) -> datetime | None:
+    """ISO 时间解析（无时区按 UTC）；不可解析返回 None。"""
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 class Ledger:
     """绩效账本：完成数 / 平均耗时 / 总成本 / 驳回率 / 人类介入率 / 奖励积分
-    / 平均验收评分 / 按时完成率。"""
+    / 平均验收评分 / 按时完成率。条目带时间戳（at），支持周期过滤（周报用）。"""
 
     def __init__(self):
         self._completions: dict[str, list[dict[str, float]]] = defaultdict(list)
@@ -22,19 +38,28 @@ class Ledger:
 
     def record_completion(self, emp_id: str, task_id: str = "", cost: float = 0.0,
                           elapsed: float = 0.0, score: float = 0.0,
-                          on_time: bool | None = None) -> None:
-        """完成记账：score=验收评分（0 表示未记）；on_time=None 表示无限期任务。"""
+                          on_time: bool | None = None, at: str = "") -> None:
+        """完成记账：score=验收评分（0 表示未记）；on_time=None 表示无限期任务；
+        at=记账时刻（ISO，缺省现在；旧数据无 at 不参与周期统计）。"""
         self._completions[emp_id].append({
             "cost": cost, "elapsed": elapsed,
             "score": score, "on_time": on_time,
+            "at": at or _now_iso(),
         })
 
     def record_rejection(self, emp_id: str) -> None:
         self._rejections[emp_id] += 1
 
-    def record_points(self, emp_id: str, delta: float, reason: str = "") -> None:
-        """记积分（正=奖励，负=扣分），每笔含原因可审计。"""
-        self._points[emp_id].append({"delta": delta, "reason": reason})
+    def record_points(self, emp_id: str, delta: float, reason: str = "",
+                      kind: str = "", at: str = "") -> None:
+        """记积分（正=奖励，负=扣分），每笔含原因可审计。
+
+        kind：rejection=驳回扣分 / acceptance=验收（含时效）；供周期统计分类。
+        """
+        self._points[emp_id].append({
+            "delta": delta, "reason": reason, "kind": kind,
+            "at": at or _now_iso(),
+        })
 
     def points(self, emp_id: str) -> float:
         return sum(p["delta"] for p in self._points.get(emp_id, []))
@@ -47,6 +72,41 @@ class Ledger:
 
     def record_human_intervention(self, emp_id: str, kind: str) -> None:
         self._interventions[emp_id] += 1
+
+    def stats_between(self, emp_id: str, start: str, end: str) -> dict[str, Any]:
+        """周期统计（财务周报用）：只统计 at ∈ [start, end] 的条目（含边界）。
+
+        旧数据（无 at 字段）无法归属周期，不计入——历史累计看 stats()。
+        """
+        s, e = _parse_ts(start), _parse_ts(end)
+        if s is None or e is None:
+            raise ValueError("stats_between 需要 ISO 时间边界")
+
+        def _in(entry) -> bool:
+            at = _parse_ts(entry.get("at", ""))
+            return at is not None and s <= at <= e
+
+        comps = [c for c in self._completions.get(emp_id, []) if _in(c)]
+        pts_entries = [p for p in self._points.get(emp_id, []) if _in(p)]
+        total_cost = sum(c["cost"] for c in comps)
+        scored = [c["score"] for c in comps if c.get("score")]
+        avg_score = (sum(scored) / len(scored)) if scored else 0.0
+        with_due = [c for c in comps if c.get("on_time") is not None]
+        on_time_count = sum(1 for c in with_due if c["on_time"])
+        on_time_rate = (on_time_count / len(with_due)) if with_due else None
+        points = sum(p["delta"] for p in pts_entries)
+        rejections = sum(1 for p in pts_entries if p.get("kind") == "rejection")
+        return {
+            "completion_count": len(comps),
+            "total_cost": total_cost,
+            "avg_score": round(avg_score, 2),
+            "on_time_count": on_time_count,
+            "due_count": len(with_due),
+            "on_time_rate": (round(on_time_rate, 4)
+                             if on_time_rate is not None else None),
+            "points": round(points, 2),
+            "rejection_count": rejections,
+        }
 
     def stats(self, emp_id: str) -> dict[str, Any]:
         comps = self._completions.get(emp_id, [])
@@ -123,9 +183,9 @@ class FileLedger(Ledger):
 
     def record_completion(self, emp_id: str, task_id: str = "", cost: float = 0.0,
                           elapsed: float = 0.0, score: float = 0.0,
-                          on_time: bool | None = None) -> None:
+                          on_time: bool | None = None, at: str = "") -> None:
         super().record_completion(emp_id, task_id, cost, elapsed,
-                                  score=score, on_time=on_time)
+                                  score=score, on_time=on_time, at=at)
         self._save()
 
     def record_rejection(self, emp_id: str) -> None:
@@ -140,8 +200,9 @@ class FileLedger(Ledger):
         super().record_human_intervention(emp_id, kind)
         self._save()
 
-    def record_points(self, emp_id: str, delta: float, reason: str = "") -> None:
-        super().record_points(emp_id, delta, reason)
+    def record_points(self, emp_id: str, delta: float, reason: str = "",
+                      kind: str = "", at: str = "") -> None:
+        super().record_points(emp_id, delta, reason, kind=kind, at=at)
         self._save()
 
     def stats_all(self) -> dict[str, dict[str, Any]]:

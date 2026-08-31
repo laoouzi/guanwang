@@ -153,7 +153,9 @@ laoban dashboard --worker-interval 5.0    # 自定义扫描间隔
 
 ### 奖励积分与成本产出比（人类/AI 统一记分）
 
-记分规则（集中定义在 `laoban/core/points.py`，改规则只动一处）：
+记分规则（集中定义在 `laoban/core/points.py`；`org.json` 顶层 `points` 段
+可覆盖默认值——`points_per_task` / `penalty_rejection` / `low_score` /
+`bonus_on_time` / `penalty_late`，组织实例化与看板启动时自动生效）：
 
 ```
 验收通过   +10 × (score/5)      # 满分 10 分、4 分 8 分、3 分 6 分
@@ -182,6 +184,31 @@ ROI        = 积分 / 累计成本     # 每元成本产出多少业绩
   验收时入账绩效账本；
 - 初创组织自带财务专家（CFO 钱掌柜）：统计各部门与员工成本、核算积分/成本产出比、
   出具成本报告与预算建议。
+
+### CFO 财务周报（成本 / 积分 / ROI · 按周归档）
+
+财务专家每周自动出一份成本报告（`laoban/core/finance.py`）：
+
+- **触发**：WorkerLoop 每周首次 tick 自动生成（ISO 周切换即触发，同周幂等
+  ——归档里已有本周报告则跳过）；生成后通过消息通知老板；
+- **口径**：按 ISO 周聚合（周一 00:00 ~ 周日 23:59:59 UTC），只统计本周
+  验收完成的任务（成本/评分/按时率）与本周积分流水（含驳回）；账目带
+  时间戳（`ledger.json` 条目 `at` 字段），旧数据不混入周期统计；
+- **内容**：公司级汇总（积分/成本/ROI/完成数/驳回数）+ 部门明细（成员按
+  积分降序）+ 预算建议（有 LLM 网关时由 CFO 模型生成 ≤120 字结论，
+  失败自动降级模板：最高/最低 ROI 部门该加投入还是收缩——周报永不缺席）；
+- **环比**：自动对比归档中上一周报告（积分/成本/完成数 delta 与百分比）；
+- **归档**：`<root>/finance_reports.json` 按周期升序追加，同周覆盖；
+- **查看**：看板「CFO 周报」卡片（周期/环比箭头/部门明细/建议/往期摘要），
+  接口 `GET /api/finance` 返回 `{current, history}`——财务数据敏感，
+  仅老板（admin）可见，其他角色 403。
+
+```
+每周首次自动运转
+  → CFO 按周期过滤账本 → 生成周报（公司/部门/ROI/建议）
+  → 归档 finance_reports.json + 消息通知老板
+  → 看板 GET /api/finance：current（含环比）+ history
+```
 
 ### 晋升通道（积分驱动 · 双轴晋升）
 
@@ -409,7 +436,8 @@ laoban acceptance run --root /tmp/laoban-acc
 ├── messages/<id>.json        # 点对点消息（MSG-*）
 ├── im_bindings.json          # IM 账号 ↔ 员工 id 绑定表（laoban im bind）
 ├── auth.json                 # 员工口令库（PBKDF2 盐+哈希，laoban auth passwd）
-├── ledger.json               # 绩效账本（看板验收/审批自动记账）
+├── ledger.json               # 绩效账本（看板验收/审批自动记账，条目带时间戳）
+├── finance_reports.json      # CFO 周报归档（按 ISO 周升序，同周覆盖）
 ├── approvals/                # 审批单档案（每单一 JSON，看板可处理）
 ├── human_tasks/<id>.json     # 人类待办（AI 派发的配合任务 / 自建 / 老板指派）
 ├── headcount_requests/       # 编制申请（双轨招聘）
@@ -419,7 +447,7 @@ laoban acceptance run --root /tmp/laoban-acc
 ## 测试
 
 ```bash
-python -m pytest tests/ -q                 # 全量回归（302 用例）
+python -m pytest tests/ -q                 # 全量回归（408 用例）
 python scripts/dashboard_worker_check.py   # 自动运转 e2e（Playwright + 假 LLM，无需 Key）
 ```
 

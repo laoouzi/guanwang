@@ -74,8 +74,19 @@ def resolve_org_path(file: str | Path | None = None,
 
 
 def load_org_for_store(store: JsonStore) -> dict[str, Any]:
-    """按 store 数据目录解析组织配置：用户 org.json 优先，否则默认模板。"""
-    return load_org(resolve_org_path(root=store.root))
+    """按 store 数据目录解析组织配置：用户 org.json 优先，否则默认模板。
+
+    顺带应用 org.json 的 points 段（积分规则配置化，幂等）——
+    server 启动 / 招聘读配置时即时生效。
+    """
+    org = load_org(resolve_org_path(root=store.root))
+    _apply_points(org)
+    return org
+
+
+def _apply_points(org: dict[str, Any]) -> None:
+    from .core.points import configure
+    configure(org.get("points"))
 
 
 def build_employee(dept: dict[str, Any], role: dict[str, Any]) -> Employee:
@@ -106,6 +117,7 @@ def instantiate(store: JsonStore, org: dict[str, Any],
     """
     if which not in ("all", "founders", "team"):
         raise ValueError(f"which 必须是 all/founders/team，收到：{which}")
+    _apply_points(org)   # org.json points 段 → 积分规则（幂等）
     created: list[Employee] = []
     for dept in org["departments"]:
         for role in dept.get("roles", []):
