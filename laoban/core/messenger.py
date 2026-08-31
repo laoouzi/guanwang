@@ -1,12 +1,45 @@
 from __future__ import annotations
 
+import threading
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from .employee import Employee
 from .permission import require_message
 from .task import utcnow
 from .store import JsonStore
+
+# 新消息通知钩子：msg 落盘后回调（msg dict）。
+# 看板注入 MessageNotifier → 新信同步推 IM（红点的离线触达面）；
+# 通知失败只打印不抛——消息总线是唯一事实源，通知是尽力而为。
+_notifier: Callable[[dict], None] | None = None
+_local = threading.local()
+
+
+def set_notifier(fn: Callable[[dict], None] | None) -> None:
+    """注入/清除新消息通知钩子（进程级，通常只在看板启动时设一次）。"""
+    global _notifier
+    _notifier = fn
+
+
+class suppress_notify:
+    """上下文管理器：本线程内落库的消息不再触发通知钩子。
+
+    两类场景用：
+    - IM 渠道线程处理入站消息：回信/中转由渠道路由自己推送，
+      再走钩子会双推；
+    - UrgeCenter 发催办信：自带定向 IM 推送（含升级链），
+      钩子的摘要推送会重复。
+    """
+
+    def __enter__(self):
+        self._prev = getattr(_local, "off", False)
+        _local.off = True
+        return self
+
+    def __exit__(self, *exc):
+        _local.off = self._prev
+        return False
 
 
 def _msg_path(store: JsonStore, msg_id: str):
@@ -20,6 +53,7 @@ def send(store: JsonStore, from_id: str, to_id: str, content: str,
     """点对点消息：权限校验（collaboration 白名单，空 = 组织内默认开放）→ 落盘。
 
     新消息天然未读（无 read_at 字段）；收件人查看后由 mark_read 补记。
+    落盘后触发通知钩子（未注入/被抑制/推送失败均不影响落盘结果）。
     """
     if not content.strip():
         raise ValueError("消息内容不能为空")
@@ -38,6 +72,11 @@ def send(store: JsonStore, from_id: str, to_id: str, content: str,
         "task_id": task_id, "created_at": utcnow(),
     }
     store._atomic_write(_msg_path(store, msg["id"]), msg)
+    if _notifier is not None and not getattr(_local, "off", False):
+        try:
+            _notifier(msg)
+        except Exception as e:   # 通知失败绝不影响消息落库
+            print(f"[notify] 新消息 IM 推送失败（{to_id}）：{e!r}")
     return msg
 
 

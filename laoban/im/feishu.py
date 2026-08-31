@@ -252,10 +252,14 @@ class FeishuWebhook:
                 reply = lambda t: self.client.send_text_chat(chat_id, t)   # noqa: E731
             else:
                 reply = lambda t: self.client.send_text(im_user, t)        # noqa: E731
-            result = route_inbound(self.store, self.gateway, self.bindings,
-                                   "feishu", im_user, text,
-                                   push=self.client.send_text,
-                                   default_to=self.default_to, reply=reply)
+            # 入站处理期间落库的回信/中转由本渠道路由推送；
+            # 抑制全局新消息钩子，避免同一条消息给对方推两次
+            from ..core.messenger import suppress_notify
+            with suppress_notify():
+                result = route_inbound(self.store, self.gateway, self.bindings,
+                                       "feishu", im_user, text,
+                                       push=self.client.send_text,
+                                       default_to=self.default_to, reply=reply)
             print(f"[IM:feishu] {result.get('summary', '')}")
         except Exception as e:   # 渠道线程兜底：任何异常都不能静默丢消息
             print(f"[IM:feishu] 处理失败（{im_user}）：{e!r}")

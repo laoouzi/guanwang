@@ -1049,5 +1049,215 @@ class TestUnreadRbac(unittest.TestCase):
         self.assertEqual(unread_count(self.store, "emp-chen"), 0)
 
 
+class TestMessageIMNotify(unittest.TestCase):
+    """#23 新消息 IM 离线推送摘要：落库即推收件人 IM；抑制不双推。"""
+
+    def setUp(self):
+        from laoban.im.notify import MessageNotifier
+        self.st = JsonStore(tempfile.mkdtemp())
+        self.st.save_employee(Employee(id="boss", name="老板", kind="human"))
+        self.st.save_employee(Employee(id="worker", name="干活的", kind="human"))
+        self.st.save_employee(Employee(id="ghost", name="没绑定的", kind="human"))
+        from laoban.im.binding import Bindings
+        self.bd = Bindings(self.st.root)
+        self.bd.bind("feishu", "ou-worker", "worker")
+
+        class _Fake:
+            def __init__(self): self.sent = []
+            def send_text(self, open_id, text): self.sent.append((open_id, text))
+
+        self.fake = _Fake()
+
+        class _Boom:
+            def send_text(self, *a): raise RuntimeError("IM 挂了")
+
+        self.notifier = MessageNotifier(self.st, feishu=self.fake)
+        self.boom = MessageNotifier(self.st, feishu=_Boom())
+        from laoban.core import messenger
+        messenger.set_notifier(self.notifier)   # 钩子进程级：每个用例都现装
+
+    def tearDown(self):
+        from laoban.core import messenger
+        messenger.set_notifier(None)   # 钩子是进程级，测完必须清
+
+    def test_summary_text(self):
+        """摘要：谁发的 + 前 40 字截断 + 任务号 + 回看指引。"""
+        long = "字" * 60
+        msg = {"from": "boss", "to": "worker", "content": long, "task_id": "T-9"}
+        text = self.notifier.summary(msg)
+        self.assertIn("【新消息】老板（boss）", text)
+        self.assertIn("字" * 40 + "…", text)
+        self.assertIn("任务 T-9", text)
+        self.assertIn("看板查看并回复", text)
+
+    def test_notify_bound_receiver(self):
+        """绑定收件人：落库即推 IM 摘要；未绑定收件人不推。"""
+        from laoban.core.messenger import send
+        send(self.st, "boss", "worker", "在吗")
+        self.assertEqual(len(self.fake.sent), 1)
+        self.assertEqual(self.fake.sent[0][0], "ou-worker")
+        self.assertIn("【新消息】", self.fake.sent[0][1])
+        self.assertIn("在吗", self.fake.sent[0][1])
+        # 未绑定 → 静默跳过（红点照常，站内信照常）
+        n = len(self.fake.sent)
+        send(self.st, "boss", "ghost", "收不到 IM 的信")
+        self.assertEqual(len(self.fake.sent), n)
+
+    def test_notify_failure_keeps_message(self):
+        """推送炸了不影响消息总线：消息照常落库（通知是尽力而为）。"""
+        from laoban.core.messenger import send, inbox
+        m = send(self.st, "boss", "worker", "IM 挂了也要落库")
+        self.assertEqual(len(inbox(self.st, "worker")), 1)
+        # 钩子直接抛错也被 send 兜住
+        self.boom({"from": "boss", "to": "worker", "content": "x"})
+        self.assertEqual(len(inbox(self.st, "worker")), 1)
+
+    def test_suppress_notify(self):
+        """suppress_notify：本线程内落库不触发（IM 渠道/催办自带推送）。"""
+        from laoban.core.messenger import send, suppress_notify
+        with suppress_notify():
+            send(self.st, "boss", "worker", "渠道自己会推")
+        self.assertEqual(self.fake.sent, [])
+        # 出了作用域恢复
+        send(self.st, "boss", "worker", "恢复推送")
+        self.assertEqual(len(self.fake.sent), 1)
+
+    def test_urge_does_not_double_push(self):
+        """催办走自带定向推送：装上全局钩子后 urge 不产生摘要双推。"""
+        from laoban.core import messenger
+        from laoban.dashboard.server import UrgeCenter
+        from laoban.core.task import Task
+        import datetime as _dt
+        messenger.set_notifier(self.notifier)   # 钩子全局生效
+        st = self.st
+        st.save_employee(Employee(id="mgr", name="中干", kind="human",
+                                  reports_to="boss"))
+        st.save_task(Task(id="T-UR", title="双推验证", due_at="2023-01-01"))
+        from laoban.core.workstation import assign_task_auto
+        assign_task_auto(st, "T-UR", "worker", actor="boss")
+        center = UrgeCenter(st, feishu=self.fake)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        center.urge(st.load_task("T-UR"), "boss", now)   # 不外加抑制
+        # 仅 UrgeCenter 自带的催办信推送，无【新消息】摘要双推
+        self.assertEqual(len(self.fake.sent), 1)
+        self.assertIn("催办", self.fake.sent[0][1])
+        self.assertNotIn("【新消息】", self.fake.sent[0][1])
+
+    def test_webhook_no_summary_duplication(self):
+        """IM 入站处理期间：渠道路由自己推回信/中转，钩子被抑制不双推。"""
+        from laoban.core import messenger
+        from laoban.core.messenger import send
+        from laoban.im.feishu import FeishuWebhook
+        messenger.set_notifier(self.notifier)
+        # 收件人也绑定 IM（route_inbound 会中转推送）
+        self.bd.bind("feishu", "ou-boss", "boss")
+        self.bd.bind("feishu", "ou-worker", "worker")
+        hook = FeishuWebhook(self.st, None, self.fake, self.bd)
+        hook._process("ou-worker", "boss: 在吗")   # 同步路径（含抑制）
+        # 中转推送 [worker] 在吗 → ou-boss；回执 → ou-worker；无【新消息】摘要
+        self.assertTrue(self.fake.sent)
+        self.assertTrue(all("【新消息】" not in t for _, t in self.fake.sent))
+        self.assertIn("已投递", self.fake.sent[-1][1])
+        # 非渠道线程的直发仍走钩子（红点触达面正常）
+        send(self.st, "boss", "worker", "直发走钩子")
+        self.assertTrue(any("【新消息】" in t for _, t in self.fake.sent))
+
+    def test_dashboard_installs_and_clears_notifier(self):
+        """看板构造：有 IM 客户端装钩子，无则清空（防上个测试串场）。"""
+        from laoban.core import messenger
+        # 无 feishu → 钩子清空
+        server = DashboardServer(self.st, port=0)
+        server.shutdown()
+        self.assertIsNone(messenger._notifier)
+        # 有 feishu → 钩子就位且能推
+        server2 = DashboardServer(self.st, port=0, feishu=self.fake)
+        server2.shutdown()
+        self.assertIsNotNone(messenger._notifier)
+        from laoban.core.messenger import send
+        send(self.st, "boss", "worker", "看板装好的钩子")
+        self.assertEqual(self.fake.sent[-1][0], "ou-worker")
+
+
+class TestPwaMounts(unittest.TestCase):
+    """#24 看板 PWA：manifest / 图标 / SW 三件静态资源 + 页面挂载。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.store = _mk_free_store()
+        cls.server = DashboardServer(cls.store, port=0)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.client = _Client(f"http://127.0.0.1:{cls.server.port}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def test_static_routes(self):
+        """manifest JSON 字段齐全；图标 PNG 魔数；SW 是 JS 文本。"""
+        import json
+        import urllib.request
+        # (路径, 校验)：manifest/SW 查内容片段，PNG 查魔数
+        checks = [("/manifest.json", lambda b: b.startswith(b"{")),
+                  ("/sw.js", lambda b: b"Service Worker" in b
+                   and b"addEventListener('fetch'" in b),
+                  ("/icon-192.png", lambda b: b.startswith(b"\x89PNG")),
+                  ("/icon-512.png", lambda b: b.startswith(b"\x89PNG"))]
+        for path, check in checks:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{self.server.port}{path}") as r:
+                body = r.read()
+                self.assertEqual(r.status, 200, path)
+                self.assertTrue(check(body), path)
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.server.port}/manifest.json") as r:
+            m = json.loads(r.read())
+        self.assertEqual(m["display"], "standalone")
+        self.assertEqual(m["start_url"], "/")
+        self.assertTrue(any(i["sizes"] == "512x512" for i in m["icons"]))
+        self.assertIn("maskable", " ".join(i.get("purpose", "")
+                                           for i in m["icons"]))
+
+    def test_unknown_static_404_safety(self):
+        """路径白名单之外的伪静态路径不落进资源处理（防穿越读源码）。"""
+        import urllib.request
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.server.port}"
+                "/manifest.json/../../server.py") as r:
+            body = r.read()
+        # 白名单不命中 → 回落看板 HTML，绝不回服务器源码
+        self.assertNotIn(b"_PWA_FILES", body)
+        self.assertIn(b"<!DOCTYPE html>", body)
+
+    def test_frontend_mounts_pwa(self):
+        """页面源码包含：manifest 链接 / 主题色 / SW 注册 / iOS 主屏标签。"""
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.server.port}/") as r:
+            html = r.read().decode()
+        self.assertIn('rel="manifest"', html)
+        self.assertIn('name="theme-color"', html)
+        self.assertIn('rel="apple-touch-icon"', html)
+        self.assertIn("apple-mobile-web-app-capable", html)
+        self.assertIn("serviceWorker.register('/sw.js')", html)
+        # SW 策略：API 永不缓存（台账永远现拉）
+        import urllib.request as _u
+        with _u.urlopen(f"http://127.0.0.1:{self.server.port}/sw.js") as r:
+            sw = r.read().decode()
+        self.assertIn("startsWith('/api/')", sw)
+        self.assertIn("caches.match", sw)
+
+    def test_frontend_mounts_tl_actions(self):
+        """#25 页面源码包含：时间线节点操作签 + 两个跳转函数。"""
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.server.port}/") as r:
+            html = r.read().decode()
+        self.assertIn("tlNodeActs", html)
+        self.assertIn("function tlChat", html)
+        self.assertIn("function tlQueue", html)
+        self.assertIn("回 ${n.escalated_to}", html)   # 升级节点直接回复
+        self.assertIn("找 ${n.actor}", html)
+        self.assertIn("tlQueue('${esc(t.assignee)}'", html)   # 承接人工位跳转
+
+
 if __name__ == "__main__":
     unittest.main()

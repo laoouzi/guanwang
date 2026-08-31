@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>laoban · 老板驾驶舱</title>
+  <!-- PWA：可安装到主屏（iOS Safari 用 apple-touch-icon，安卓/桌面走 manifest） -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#231f1a">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+  <link rel="apple-touch-icon" href="/icon-512.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="老板账本">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <style>
     /* ============================================================
        账房美学 Ledger & Ink —— 暖纸底 / 墨字 / 朱砂印章 / 账本横线
@@ -209,6 +218,13 @@
     .tl-remark { color: var(--ink-3); font-size: 12px; }
     .tl-dwell { color: var(--ochre); font-family: var(--mono); font-size: 11px;
                 white-space: nowrap; }
+    /* 节点操作签：墨框小签，点一下带人名跳到对应功能区（回信/看工位） */
+    .tl-act { display: inline-block; border: 1px solid var(--line);
+              border-radius: 3px; background: var(--paper);
+              color: var(--indigo); font-size: 11.5px; font-family: var(--mono);
+              padding: 1px 8px; cursor: pointer; white-space: nowrap;
+              line-height: 1.6; text-decoration: none; }
+    .tl-act:hover { border-color: var(--ink); color: var(--ink); }
 
     /* ---- 操作反馈：朱批 ---- */
     #opMsg {
@@ -293,6 +309,7 @@
       table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
       thead th, tbody td { white-space: nowrap; }
       tr.tl-row > td { white-space: normal; }   /* 时间线行允许折行 */
+      .tl-act { padding: 4px 10px; font-size: 12px; }   /* 手指可点（≥28px 高） */
       #chatContent { width: 100% !important; }
       #chatLog { max-width: 100%; }
       .chat-line { max-width: 90%; }
@@ -763,19 +780,58 @@
         const prev = i > 0 ? nodes[i - 1].at : '';
         const dwell = i > 0 && prev && n.at
           ? dwellText(new Date(n.at) - new Date(prev)) : '';
+        // 操作签：带人名直达功能区（催办节点可回承接人/被抄送的上级，
+        // 流转节点可找该环节操作人；自己跳过，后端权限仍是最终把关）
+        const acts = tlNodeActs(n);
         return `<div class="${cls}">` +
           `<span class="tl-at">${esc(at)}</span><span class="tl-move">${esc(move)}</span>` +
           (actor ? `<span class="tl-actor">${esc(actor)}</span>` : '') +
           (remark ? `<span class="tl-remark">${esc(remark)}</span>` : '') +
           (dwell ? `<span class="tl-dwell" title="上一环节到此停留">⏳${esc(dwell)}</span>` : '') +
+          (acts ? `<span class="tl-acts">${acts}</span>` : '') +
           `</div>`;
       }).join('');
-      const meta = `提交人 ${esc(t.created_by || '—')} · 承接人 ${esc(t.assignee || '未指派')}` +
-        ` · 返工 ${t.review_round || 0} 轮 · 现状 ${esc(STATE_LABEL[t.state] || t.state)}` +
-        (t.block_reason ? ` · 阻塞原因：${esc(t.block_reason)}` : '') +
-        ` · 截止 ${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '不限期'}`;
+      const meta = `提交人 ${esc(t.created_by || '—')} · 承接人 ${esc(t.assignee || '未指派')}`
+        + (t.assignee ? ` <a class="tl-act" href="#queueSection" title="看 ${esc(t.assignee)} 的工位队列" onclick="tlQueue('${esc(t.assignee)}');return false;">工位</a>` : '')
+        + ` · 返工 ${t.review_round || 0} 轮 · 现状 ${esc(STATE_LABEL[t.state] || t.state)}`
+        + (t.block_reason ? ` · 阻塞原因：${esc(t.block_reason)}` : '')
+        + ` · 截止 ${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '不限期'}`;
       return `<tr class="tl-row"><td colspan="7"><div class="tl-wrap">` +
         `<p class="tl-meta">${meta}</p>${rows}</div></td></tr>`;
+    }
+
+    function tlNodeActs(n) {
+      // 节点操作签（HTML）：回信谁就生成谁的签；本人节点不出签
+      const me = window._me?.id;
+      const chip = (id, label) =>
+        (id && id !== me && n.kind !== 'submit')
+          ? `<a class="tl-act" href="#chatSection" title="给 ${esc(id)} 发消息" onclick="tlChat('${esc(id)}');return false;">${esc(label)}</a>`
+          : '';
+      if (n.kind === 'urge') {
+        // 升级节点直接回复：催的是承接人，抄送的是上级——都可一键回信
+        return chip(n.to, `回 ${n.to}`) + chip(n.escalated_to, `回 ${n.escalated_to}`);
+      }
+      return chip(n.actor, `找 ${n.actor}`);   // 流转节点：找该环节操作人问进度
+    }
+
+    // 时间线跳转①：带收件人进对话区（登录过顺手带出两人的历史来往）
+    function tlChat(emp) {
+      if (!emp) return;
+      const to = document.getElementById('chatTo');
+      if (to) to.value = emp;
+      document.getElementById('chatSection').scrollIntoView({ behavior: 'smooth' });
+      setTimeout(() => document.getElementById('chatContent')?.focus(), 400);
+      if (window._me?.id) loadChatHistory();
+    }
+
+    // 时间线跳转②：看承接人工位队列（staff 的队列框锁定本人，不越权代查）
+    function tlQueue(emp) {
+      if (!emp) return;
+      const q = document.getElementById('queueWho');
+      if (!q || q.disabled) return;
+      q.value = emp;
+      loadQueue();
+      document.getElementById('queueSection').scrollIntoView({ behavior: 'smooth' });
     }
 
     function renderTasks() {
@@ -1600,6 +1656,14 @@
     });
 
     load().then(markRefreshed);   // 首次加载完成即记录基线时间
+
+    // ---- PWA：注册 Service Worker（应用壳离线可开；注册失败静默降级）----
+    if ('serviceWorker' in navigator) {
+      addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch((e) =>
+          console.info('SW 注册失败（不影响看板）：', e));
+      });
+    }
   </script>
 </body>
 </html>

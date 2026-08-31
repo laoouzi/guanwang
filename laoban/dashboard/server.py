@@ -24,6 +24,16 @@ from . import rbac
 
 SESSION_COOKIE = "laoban_session"
 
+# PWA 静态资源：manifest + 图标 + Service Worker（与 dashboard.html 同目录）。
+# 路径白名单方式提供，杜绝目录穿越。
+_DASH_DIR = Path(__file__).parent
+_PWA_FILES = {
+    "/manifest.json": (_DASH_DIR / "manifest.json", "application/manifest+json"),
+    "/sw.js": (_DASH_DIR / "sw.js", "application/javascript"),
+    "/icon-192.png": (_DASH_DIR / "icon-192.png", "image/png"),
+    "/icon-512.png": (_DASH_DIR / "icon-512.png", "image/png"),
+}
+
 
 def _task_source(task: Task) -> str:
     """任务来源：assigned=被动分配（别人派给我）/ self=个人计划（自己提的）/
@@ -224,7 +234,7 @@ class UrgeCenter:
         站内信必达（失败抛 ValueError 由调用方兜底）；催办与升级记录落
         task.urge_log（auto / im / im_up 标记来源与推送结果）。
         """
-        from ..core.messenger import send
+        from ..core.messenger import send, suppress_notify
         from ..core.permission import PermissionDenied
 
         assignee = task.assignee
@@ -235,8 +245,9 @@ class UrgeCenter:
         urge_count = len(task.urge_log) + 1
         urge_text = (f"【催办】任务 {task.id}《{task.title}》已超期 {overdue}"
                      f"（截止 {due_show}），请尽快交付或联系老板说明。")
-        try:
-            send(self.store, sender_id, assignee, urge_text, task_id=task.id)
+        try:   # suppress：催办信自带定向 IM 推送，别再走全局摘要钩子
+            with suppress_notify():
+                send(self.store, sender_id, assignee, urge_text, task_id=task.id)
         except (ValueError, KeyError, PermissionDenied) as e:
             raise ValueError(f"催办信发送失败：{e}")
         im_ok = self.im_push(assignee, urge_text)
@@ -274,8 +285,9 @@ class UrgeCenter:
                 esc_text = (f"【催办升级】任务 {task.id}《{task.title}》"
                             f"已催 {urge_count} 次未响应，超期 {overdue}，"
                             f"承接人 {assignee}，请介入处理。")
-                try:
-                    send(self.store, sender_id, target, esc_text, task_id=task.id)
+                try:   # 同上：升级信自带定向 IM 推送
+                    with suppress_notify():
+                        send(self.store, sender_id, target, esc_text, task_id=task.id)
                     escalated_to = target
                     esc_im_ok = self.im_push(target, esc_text)
                     escalate_note = f"（第 {urge_count} 次催办未响应，已抄送上级 {target}）"
@@ -386,6 +398,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _error(self, status: int, message: str):
         return self._json({"error": message}, status)
+
+    def _serve_static(self, entry: tuple):
+        """PWA 静态资源：磁盘读 + 短缓存（图标/manifest 变更频率低）。"""
+        path, ctype = entry
+        try:
+            body = path.read_bytes()
+        except OSError:
+            return self._error(404, "资源不存在")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
@@ -1205,6 +1231,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
+        # ---- PWA 静态资源（免登录：安装/图标不挑人）----
+        if u.path in _PWA_FILES:
+            return self._serve_static(_PWA_FILES[u.path])
         if u.path == "/api/me":
             if self.auth and self.auth.enabled():
                 me = self._session_emp()
@@ -1432,6 +1461,11 @@ class DashboardServer:
     def __init__(self, store: JsonStore, port: int = 7891, gateway=None,
                  feishu=None, auth=None):
         center = UrgeCenter(store, feishu)
+        # 新消息 IM 离线摘要：注入进程级钩子（无 IM 客户端则清空，
+        # 保证上一个测试留下的钩子不串场）
+        from ..core import messenger
+        from ..im.notify import MessageNotifier
+        messenger.set_notifier(MessageNotifier(store, feishu) if feishu else None)
         handler = type("H", (_Handler,), {
             "store": store, "gateway": gateway, "feishu": feishu,
             "auth": auth, "sessions": {},

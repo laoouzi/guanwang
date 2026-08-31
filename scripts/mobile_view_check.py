@@ -262,6 +262,54 @@ def _check() -> int:
         assert_("催办徽标渲染（催2）",
                 page.locator("#tasks .wait-badge").filter(has_text="催2").count() == 1)
 
+        # ---- #25 时间线节点操作跳转 ----
+        # 催办节点出「回 emp-chen」「回 dev」「回 pm」签；流转节点出「找 ·」签
+        acts = page.locator("#tasks .tl-act")
+        acts_text = acts.all_inner_texts()
+        assert_(f"操作签渲染（{len(acts_text)} 枚）",
+                any(t.startswith("回 ") for t in acts_text)
+                and any(t.startswith("找 ") for t in acts_text))
+        assert_("升级节点直接回复签（回 dev / 回 pm）",
+                "回 dev" in acts_text and "回 pm" in acts_text)
+        assert_("承接人工位跳转签",
+                page.locator("#tasks .tl-meta .tl-act").count() == 1)
+        page.screenshot(path="/workspace/scripts/mobile_view_tl_acts.png")
+        # 点「回 emp-chen」→ 对话区收件人预填 + 视口滚到对话区
+        page.locator("#tasks .tl-act", has_text="回 emp-chen").first.click()
+        page.wait_for_timeout(700)   # smooth 滚动
+        assert_("点击回信签：chatTo 预填 emp-chen",
+                page.input_value("#chatTo") == "emp-chen")
+        chat_box = page.evaluate(
+            "() => { const r = document.getElementById('chatSection')"
+            ".getBoundingClientRect(); return r.top; }")
+        assert_(f"点击回信签：视口滚到对话区（top={chat_box:.0f}）",
+                -100 < chat_box < 500)
+        # 点 meta 的「工位」→ 队列区预填承接人并加载（T-1002 仍展开）
+        page.locator("#tasks .tl-meta .tl-act", has_text="工位").click()
+        page.wait_for_timeout(700)
+        assert_("点击工位签：queueWho 预填 emp-chen",
+                page.input_value("#queueWho") == "emp-chen")
+        assert_("点击工位签：队列已加载（表格有任务行）",
+                page.locator("#queueTasks tbody tr").count() >= 1)
+
+        # ---- #24 PWA：manifest / 图标 / SW ----
+        page.wait_for_timeout(500)   # 等 load 事件后 SW 注册+激活+claim
+        pwa = page.evaluate("""async () => {
+          const m = await (await fetch('/manifest.json')).json();
+          const icons = await Promise.all(m.icons.map(async i =>
+            (await fetch(i.src)).status));
+          const sw = await navigator.serviceWorker.getRegistration();
+          return {display: m.display, start: m.start_url, icons,
+                  sw: !!sw, scope: sw ? sw.scope : ''};
+        }""")
+        assert_(f"manifest standalone + start_url=/（{pwa['display']}）",
+                pwa["display"] == "standalone" and pwa["start"] == "/")
+        assert_(f"manifest 图标全部可达（{pwa['icons']}）",
+                all(s == 200 for s in pwa["icons"]))
+        assert_(f"Service Worker 已注册（scope={pwa['scope']}）", pwa["sw"])
+        assert_("页面受 SW 控制（离线壳就绪）",
+                page.evaluate("!!navigator.serviceWorker.controller"))
+
         # ---- 员工走查：未读红点 ----
         page.click("text=退出")
         page.wait_for_timeout(400)
