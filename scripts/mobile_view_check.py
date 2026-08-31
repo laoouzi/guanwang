@@ -328,9 +328,24 @@ def _check() -> int:
         page.screenshot(path="/workspace/scripts/mobile_view_inbox.png")
 
         page.screenshot(path="/workspace/scripts/mobile_view_full.png", full_page=True)
-        assert_("零 JS 报错", not errors)
-        if errors:
-            print("  报错明细：", errors[:5])
+
+        # ---- #24 PWA 真离线回退：断网后应用壳仍可打开（数据区现拉失败属正常）----
+        ctx.set_offline(True)
+        page.reload()
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_timeout(800)
+        assert_("离线仍能打开应用壳（顶栏 + 品牌在）",
+                page.locator("header.topbar .brand").count() == 1)
+        assert_("离线导航锚点齐全（10 项）",
+                page.locator("nav.anchors a").count() == 10)
+        page.screenshot(path="/workspace/scripts/mobile_view_offline.png")
+        ctx.set_offline(False)
+
+        # 零 JS 报错：断网回退期数据接口 fetch 失败是预期行为，排除后仍应无脚本错误
+        real_errors = [e for e in errors if "Failed to fetch" not in e]
+        assert_("零 JS 报错（离线期 fetch 失败除外）", not real_errors)
+        if real_errors:
+            print("  报错明细：", real_errors[:5])
         ctx.close()
         browser.close()
     print("[DONE] 截图：scripts/mobile_view_{top,timeline,reddot,inbox,full}.png")
