@@ -330,6 +330,60 @@ class TestOpsFreeAuth(unittest.TestCase):
         self.assertGreaterEqual(
             {r["id"]: r for r in body["rows"]}["dev"]["completion_count"], 1)
 
+    def test_workload_view(self):
+        """负荷视图：在办/待执行/执行中/待验收/超期/今日完成计数 + 排序。"""
+        from laoban.core.task import REPORTING
+        # 基线（增量断言，避免依赖同类其他用例留下的任务）
+        _, rows0 = self.client.get("/api/workload")
+        base = {r["id"]: r for r in rows0}
+        # dev：+1 执行中（doing）
+        _, s1 = self.client.post("/api/task/submit", {"title": "执行中的活"})
+        self.client.post("/api/task/assign", {"id": s1["id"], "to": "dev"})
+        t = self.store.load_task(s1["id"])
+        advance(t, DOING, actor="dev")
+        self.store.save_task(t)
+        # dev：+1 超期待验收（doing → reporting，仍在队列）
+        _, s2 = self.client.post("/api/task/submit",
+                                 {"title": "超期交付", "due_at": "2023-01-01"})
+        self.client.post("/api/task/assign", {"id": s2["id"], "to": "dev"})
+        t2 = self.store.load_task(s2["id"])
+        advance(t2, DOING, actor="dev")
+        advance(t2, REPORTING, actor="dev")
+        self.store.save_task(t2)
+        # emp-chen：+1 待执行（assigned 在队列排队）
+        _, s3 = self.client.post("/api/task/submit", {"title": "排队中的活"})
+        self.client.post("/api/task/assign", {"id": s3["id"], "to": "emp-chen"})
+        # dev：+1 今日完成（验收出队）
+        _, s4 = self.client.post("/api/task/submit", {"title": "今日完成的活"})
+        self.client.post("/api/task/assign", {"id": s4["id"], "to": "dev"})
+        t4 = self.store.load_task(s4["id"])
+        advance(t4, DOING, actor="dev")
+        self.store.save_task(t4)
+        self.client.post("/api/task/accept", {"id": s4["id"], "score": 4})
+
+        status, rows = self.client.get("/api/workload")
+        self.assertEqual(status, 200)
+        by = {r["id"]: r for r in rows}
+        # dev：在办 +2（doing + reporting 均占队列）、待验收 +1、超期 +1、今日完成 +1
+        for key, delta in (("queue", 2), ("assigned", 0), ("doing", 1),
+                           ("reporting", 1), ("overdue", 1), ("done_today", 1)):
+            self.assertEqual(by["dev"][key], base["dev"][key] + delta,
+                             f"dev.{key}")
+        # emp-chen：在办 +1，全是待执行
+        self.assertEqual(by["emp-chen"]["queue"],
+                         base["emp-chen"]["queue"] + 1)
+        self.assertEqual(by["emp-chen"]["assigned"],
+                         base["emp-chen"]["assigned"] + 1)
+        # 排序：在职优先 → 在办总数升序（第一行 = 最闲）
+        active_queues = [r["queue"] for r in rows if r["status"] == "active"]
+        self.assertEqual(active_queues, sorted(active_queues))
+        # 非在职垫底（王姐停职后最忙也排最后）
+        wang = self.store.load_employee("emp-wang")
+        wang.status = "suspended"
+        self.store.save_employee(wang)
+        _, rows2 = self.client.get("/api/workload")
+        self.assertEqual(rows2[-1]["id"], "emp-wang")
+
     def test_file_ledger_persists(self):
         """记账后新 server 实例（模拟重启）能读到旧账。"""
         # 本测试自证：先走一遍完整验收产生账目
@@ -428,6 +482,23 @@ class TestOpsRbac(unittest.TestCase):
         s = self._login("emp-chen", "pw-chen")
         _, body = s.get("/api/report/payroll")
         self.assertEqual({r["id"] for r in body["rows"]}, {"emp-chen"})
+
+    def test_workload_scope_by_role(self):
+        """负荷可见范围：admin 全公司 / manager 本部门 / staff 本部门。"""
+        c = self._login("boss", "pw-boss")
+        status, rows = c.get("/api/workload")
+        self.assertEqual(status, 200)
+        self.assertTrue({r["id"] for r in rows} >=
+                        {"boss", "mgr-dev", "dev", "emp-chen", "emp-wang"})
+        m = self._login("mgr-dev", "pw-mgr")
+        _, rows = m.get("/api/workload")
+        self.assertEqual({r["id"] for r in rows},
+                         {"mgr-dev", "dev", "emp-chen", "emp-xiaoli"})
+        s = self._login("emp-chen", "pw-chen")
+        _, rows = s.get("/api/workload")
+        # staff：本部门口径（同花名册，均为计数不含敏感字段）
+        self.assertEqual({r["id"] for r in rows},
+                         {"mgr-dev", "dev", "emp-chen", "emp-xiaoli"})
 
     def test_manager_assign_only_own_dept(self):
         m = self._login("mgr-dev", "pw-mgr")

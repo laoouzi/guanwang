@@ -212,6 +212,8 @@
     #who { padding: 7px 10px; }
     #loginBar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0; padding: 14px 0 18px; border-bottom: 1px solid var(--line-soft); }
     #meInfo a { color: var(--vermilion); }
+    #focusBar a { color: var(--vermilion); font-weight: 600; }
+    #assignHint a { color: var(--vermilion); }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -225,7 +227,7 @@
       <nav class="anchors">
         <a href="#cockpit">驾驶舱</a><a href="#approvalSection">审批</a><a href="#perfSection">绩效</a>
         <a href="#pointsSection">积分榜</a><a href="#financeSection">CFO 周报</a><a href="#plansSection">计划</a>
-        <a href="#orgSection">组织</a><a href="#employeesSection">花名册</a><a href="#chatSection">对话</a>
+        <a href="#orgSection">组织</a><a href="#employeesSection">花名册</a><a href="#workloadSection">负荷</a><a href="#chatSection">对话</a>
       </nav>
     </div>
   </header>
@@ -245,6 +247,7 @@
 
     <section class="sheet" id="cockpit">
       <h2>任务驾驶舱<span class="hint">提交 → 派发 → 验收</span></h2>
+      <p id="focusBar" class="msg-meta">今日焦点：载入中…</p>
       <p id="opMsg" class="msg-meta"></p>
       <p class="form-row">
         <input id="newTaskTitle" placeholder="新任务标题" style="width:22%" />
@@ -266,6 +269,7 @@
         <input id="assignTo" list="rosterIds" placeholder="派给谁（同事 id）" />
         <datalist id="rosterIds"></datalist>
         <button onclick="assignTask()">派发</button>
+        <span id="assignHint" class="msg-meta"></span>
       </p>
       <p class="form-row" id="acceptRow">
         <input id="acceptId" placeholder="任务 id（doing/reporting）" />
@@ -373,6 +377,19 @@
 
     <section class="sheet" id="tasksSection">
       <h2>任务台账</h2>
+      <p class="form-row">
+        <select id="taskStateFilter" onchange="renderTasks()" style="width:14%">
+          <option value="">全部任务</option>
+          <option value="flying">在飞（已派未完）</option>
+          <option value="reporting">待验收</option>
+          <option value="pending">待分拣</option>
+          <option value="overdue">已超期</option>
+          <option value="blocked">已阻塞</option>
+          <option value="done">已完成</option>
+        </select>
+        <input id="taskWhoFilter" list="rosterIds" placeholder="按承接人筛（空 = 全部）" style="width:20%" onchange="renderTasks()" oninput="renderTasks()" />
+        <span id="taskFilterMeta" class="msg-meta"></span>
+      </p>
       <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th><th>操作</th></tr></thead><tbody></tbody></table>
     </section>
 
@@ -390,6 +407,14 @@
     <section class="sheet" id="employeesSection">
       <h2>员工花名册</h2>
       <table id="employees"><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>部门</th><th>状态</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="workloadSection">
+      <h2>员工负荷<span class="hint">在办 / 待执行 / 执行中 / 待验收 · 派单前看谁闲</span></h2>
+      <table id="workload"><thead><tr>
+        <th>员工</th><th>类型</th><th>部门</th><th>状态</th><th>在办</th><th>待执行</th><th>执行中</th><th>待验收</th><th>超期</th><th>今日完成</th>
+      </tr></thead><tbody></tbody></table>
+      <p id="workloadMeta" class="hint"></p>
     </section>
 
     <section class="sheet" id="chatSection">
@@ -503,25 +528,78 @@
       return parts.length ? ` <span class="hint">${parts.join('，')}</span>` : '';
     }
 
+    // 今日焦点栏：老板打开看板 3 秒内知道该处理什么
+    // （审批积压 / 待验收黑洞 / 超期在飞 / 死单阻塞，均可点击跳转）
+    function renderFocus() {
+      const tasks = window._tasks || [];
+      const approvals = window._approvals || [];
+      const parts = [];
+      const pending = approvals.filter(a => a.status === 'pending').length;
+      if (pending) parts.push(`待审批 <a href="#approvalSection">${pending} 件</a>`);
+      const rp = tasks.filter(t => t.state === 'reporting');
+      if (rp.length) {
+        const worst = Math.max(...rp.map(t =>
+          (Date.now() - new Date(t.updated_at).getTime()) / 3600000));
+        const worstTxt = isFinite(worst) && worst >= 1
+          ? `（最老 ${Math.round(worst)} 时）` : '';
+        parts.push(`待验收 <a href="#tasksSection">${rp.length} 件${worstTxt}</a>`);
+      }
+      const od = tasks.filter(t => overdueHours(t) > 0);
+      if (od.length) parts.push(`超期在飞 <a href="#tasksSection">${od.length} 件</a>`);
+      const blk = tasks.filter(t => t.state === 'blocked');
+      if (blk.length) parts.push(`阻塞 <a href="#tasksSection">${blk.length} 件</a>`);
+      document.getElementById('focusBar').innerHTML =
+        '<b>今日焦点：</b>' + (parts.length ? parts.join(' · ')
+                                    : '无积压——审批 / 验收 / 在飞全清');
+    }
+
+    // 任务台账筛选：在飞 / 待验收 / 待分拣 / 超期 / 阻塞 / 完成 + 承接人
+    const FLYING_STATES = ['assigned', 'doing', 'reporting', 'waiting_human'];
+    function taskMatches(t, filter, who) {
+      if (who && (t.assignee || '') !== who) return false;
+      switch (filter) {
+        case 'flying': return FLYING_STATES.includes(t.state);
+        case 'reporting': return t.state === 'reporting';
+        case 'pending': return t.state === 'pending';
+        case 'overdue': return overdueHours(t) > 0;
+        case 'blocked': return t.state === 'blocked';
+        case 'done': return t.state === 'done';
+        default: return true;
+      }
+    }
+
+    function renderTasks() {
+      const tasks = window._tasks || [];
+      const filter = document.getElementById('taskStateFilter').value;
+      const who = document.getElementById('taskWhoFilter').value.trim();
+      const shown = tasks.filter(t => taskMatches(t, filter, who));
+      document.querySelector('#tasksSection h2').innerHTML =
+        '任务台账' + backlogNote(tasks);
+      document.querySelector('#tasks tbody').innerHTML = shown.length
+        ? shown.map(t => {
+          const acts = [];
+          if (t.state === 'blocked') {
+            acts.push(`<button onclick="retryTask('${esc(t.id)}')">重新执行</button>`);
+          } else if (overdueHours(t) > 0) {
+            acts.push(`<button class="vermilion" onclick="urgeTask('${esc(t.id)}')">催办</button>`);
+          }
+          return `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td>` +
+          `<td>${esc(STATE_LABEL[t.state] || t.state)}${waitBadge(t)}${t.block_reason ? ` <span class="hint" title="${esc(t.block_reason)}">ⓧ原因</span>` : ''}</td>` +
+          `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}${overdueBadge(t)}</td>` +
+          `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td>` +
+          `<td>${acts.length ? acts.join(' ') : '—'}</td></tr>`;
+        }).join('')
+        : '<tr><td colspan="6" class="empty">无匹配任务（换个筛选条件试试）</td></tr>';
+      document.getElementById('taskFilterMeta').textContent =
+        tasks.length ? `显示 ${shown.length} / ${tasks.length} 件` : '';
+    }
+
     async function load() {
       // 未登录时接口返回 401 JSON 对象（非数组），需防御避免 .map 崩溃
       const ts = await (await fetch('/api/tasks')).json().catch(() => []);
-      const tasks = Array.isArray(ts) ? ts : [];
-      document.querySelector('#tasksSection h2').innerHTML =
-        '任务台账' + backlogNote(tasks);
-      document.querySelector('#tasks tbody').innerHTML = tasks.map(t => {
-        const acts = [];
-        if (t.state === 'blocked') {
-          acts.push(`<button onclick="retryTask('${esc(t.id)}')">重新执行</button>`);
-        } else if (overdueHours(t) > 0) {
-          acts.push(`<button class="vermilion" onclick="urgeTask('${esc(t.id)}')">催办</button>`);
-        }
-        return `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td>` +
-        `<td>${esc(STATE_LABEL[t.state] || t.state)}${waitBadge(t)}${t.block_reason ? ` <span class="hint" title="${esc(t.block_reason)}">ⓧ原因</span>` : ''}</td>` +
-        `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}${overdueBadge(t)}</td>` +
-        `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td>` +
-        `<td>${acts.length ? acts.join(' ') : '—'}</td></tr>`;
-      }).join('');
+      window._tasks = Array.isArray(ts) ? ts : [];
+      renderTasks();
+      renderFocus();
       const es = await (await fetch('/api/employees')).json().catch(() => []);
       const roster = Array.isArray(es) ? es : [];
       document.querySelector('#employees tbody').innerHTML = roster.map(e =>
@@ -537,6 +615,7 @@
         `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.title || '')}（${esc(STATUS_LABEL[e.status] || e.status)}）</option>`).join('');
       await loadOrg();
       await loadMe();
+      await loadWorkload();
       await loadApprovals();
       await loadHeadcount();
       await loadPerf();
@@ -758,6 +837,8 @@
       const resp = await fetch('/api/approvals');
       if (!resp.ok) return;
       const rows = await resp.json();
+      window._approvals = rows;   // 今日焦点栏：审批积压计数
+      renderFocus();
       const me = window._me || {};
       const isAdmin = (me.role || 'admin') === 'admin';
       document.querySelector('#approvals tbody').innerHTML = rows.length ? rows.map(a => {
@@ -1020,6 +1101,50 @@
           `<td><span class="queue-count">${e.queue.length}</span></td></tr>`).join('') +
         '</tbody></table></div>').join('')
         : '<p class="empty">暂无员工</p>';
+    }
+
+    // ---- 员工负荷（派单前看谁闲；后端已按「在职优先 + 在办升序」排好）----
+    async function loadWorkload() {
+      const resp = await fetch('/api/workload');
+      if (!resp.ok) {
+        window._workload = [];
+        document.querySelector('#workload tbody').innerHTML = '';
+        renderAssignHint();
+        return;
+      }
+      const rows = await resp.json();
+      window._workload = rows;
+      document.querySelector('#workload tbody').innerHTML = rows.length
+        ? rows.map(r =>
+          `<tr><td>${esc(r.name)} <span class="hint">${esc(r.id)}</span></td>` +
+          `<td>${r.kind === 'ai' ? 'AI' : '人类'}</td><td>${esc(r.department)}</td>` +
+          `<td>${statusBadge(r.status)}</td>` +
+          `<td><span class="queue-count">${r.queue}</span></td>` +
+          `<td>${r.assigned}</td><td>${r.doing}</td><td>${r.reporting}</td>` +
+          `<td>${r.overdue ? `<span class="wait-badge late">⚠${r.overdue}</span>` : '—'}</td>` +
+          `<td>${r.done_today || '—'}</td></tr>`).join('')
+        : '<tr><td colspan="10" class="empty">暂无员工</td></tr>';
+      const active = rows.filter(r => r.status === 'active');
+      document.getElementById('workloadMeta').textContent =
+        `在职 ${active.length} 人 · 最闲：` +
+        (active.length ? `${active[0].name}（在办 ${active[0].queue}）` : '—') +
+        '（在办 = 工位队列深度，任务从派发到验收一直占位）';
+      renderAssignHint();
+    }
+
+    // 派单推荐：负荷最轻的前三名，点击直接填入派单框（派单从凭记忆变成看数据）
+    function renderAssignHint() {
+      const el = document.getElementById('assignHint');
+      if (!el) return;
+      const active = (window._workload || []).filter(r => r.status === 'active');
+      if (!active.length) { el.innerHTML = ''; return; }
+      el.innerHTML = '推荐：' + active.slice(0, 3).map((r, i) =>
+        `<a href="#" title="在办 ${r.queue} 件，点击填入" onclick="pickAssignee('${esc(r.id)}');return false;">` +
+        `${esc(r.name)}（在办 ${r.queue}${i === 0 ? ' · 最闲' : ''}）</a>`).join(' · ');
+    }
+
+    function pickAssignee(id) {
+      document.getElementById('assignTo').value = id;
     }
 
     async function loadMessages() {

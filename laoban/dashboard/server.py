@@ -879,6 +879,60 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         return None
 
+    def _workload(self, role: str, me) -> list[dict]:
+        """员工工作负荷视图（派单前参考）：谁闲派谁，防单点积压。
+
+        口径（工位队列语义：任务从派发到验收一直占着队列）：
+        - queue：在办总数（workspace.queue 深度，worker 扫描的事实源）；
+        - assigned：待执行（在队列中排队等开工）；
+        - doing：执行中（含等人工 waiting_human）；
+        - reporting：待验收（干完了在等老板/负责人评分）；
+        - overdue：在办且超期数（口径同催办）；
+        - done_today：今日完成数（updated_at 按 UTC 日界）；
+        可见范围：admin 全公司 / manager 本部门（含自己）/
+        staff 本部门（均为计数，不含敏感字段）。
+        排序：在职优先 → 在办总数升序（第一行 = 最闲）。
+        """
+        from ..core.task import WAITING_HUMAN
+        emps = self.store.list_employees()
+        if role == rbac.MANAGER and me is not None:
+            allowed = set(rbac.dept_members(self.store, me)) | {me.id}
+            emps = [e for e in emps if e.id in allowed]
+        elif role == rbac.STAFF:
+            members = rbac.dept_members(self.store, me) if me is not None \
+                else set()
+            emps = [e for e in emps if e.id in members]
+        rows = {e.id: {
+            "id": e.id, "name": e.name, "kind": e.kind,
+            "department": e.department or "—",
+            "status": e.status,
+            "queue": len(e.workspace.get("queue", [])),
+            "assigned": 0, "doing": 0, "reporting": 0,
+            "overdue": 0, "done_today": 0,
+        } for e in emps}
+        today = datetime.datetime.now(
+            datetime.timezone.utc).date().isoformat()
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        for t in self.store.list_tasks():
+            a = t.assignee
+            if a not in rows:
+                continue
+            if t.state == ASSIGNED:
+                rows[a]["assigned"] += 1
+            elif t.state in (DOING, WAITING_HUMAN):
+                rows[a]["doing"] += 1
+            elif t.state == REPORTING:
+                rows[a]["reporting"] += 1
+            elif t.state == DONE and (t.updated_at or "").startswith(today):
+                rows[a]["done_today"] += 1
+            if t.state in (ASSIGNED, DOING, REPORTING, WAITING_HUMAN):
+                due = _parse_dt(t.due_at) if t.due_at else None
+                if due is not None and now_dt > due:
+                    rows[a]["overdue"] += 1
+        out = list(rows.values())
+        out.sort(key=lambda r: (r["status"] != "active", r["queue"], r["id"]))
+        return out
+
     def _who_required(self, u) -> str | None:
         who = parse_qs(u.query).get("who", [""])[0]
         if not who:
@@ -917,6 +971,9 @@ class _Handler(BaseHTTPRequestHandler):
                                rbac.visible_tasks(self.store, me, role)])
         if u.path == "/api/employees":
             return self._json(rbac.visible_employees(self.store, me, role))
+        if u.path == "/api/workload":
+            # 员工负荷视图：派单前看谁闲（在办/待执行/执行中/待验收/超期计数）
+            return self._json(self._workload(role, me))
         if u.path == "/api/org":
             return self._json(self._org(role, me))
         if u.path == "/api/human-tasks":
