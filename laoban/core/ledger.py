@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -182,17 +180,13 @@ class FileLedger(Ledger):
 
     def _persist(self) -> None:
         """每笔记账后原子写盘（由基类钩子调用）。"""
-        d = {
+        self.store._atomic_write(self.path, {
             "completions": dict(self._completions),
             "rejections": dict(self._rejections),
             "steps": dict(self._steps),
             "interventions": dict(self._interventions),
             "points": dict(self._points),
-        }
-        fd, tmp = tempfile.mkstemp(dir=self.store.root, suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
+        })
 
     def stats_all(self) -> dict[str, dict[str, Any]]:
         """全部有记录员工的统计（看板绩效面板用）。"""
