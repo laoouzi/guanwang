@@ -146,6 +146,20 @@ def _parse_due(s: str) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _parse_dt(s: str) -> datetime.datetime | None:
+    """ISO 时间解析（无时区按 UTC）；不可解析/空返回 None。"""
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
 class _Handler(BaseHTTPRequestHandler):
     store: JsonStore = None  # 由工厂注入
     gateway = None           # 可选：聊天端点需要 LLM 网关
@@ -313,7 +327,7 @@ class _Handler(BaseHTTPRequestHandler):
         # ---- 任务操作 / 审批决策 / 编制申请（老板驾驶舱）----
         if u.path in ("/api/task/submit", "/api/task/assign",
                       "/api/task/accept", "/api/task/report",
-                      "/api/task/retry",
+                      "/api/task/retry", "/api/task/urge",
                       "/api/approval/decide",
                       "/api/headcount/submit", "/api/headcount/decide"):
             return self._handle_operation(u.path)
@@ -339,6 +353,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._op_report(role, me, body)
             if path == "/api/task/retry":
                 return self._op_retry(role, me, body)
+            if path == "/api/task/urge":
+                return self._op_urge(role, me, body)
             if path == "/api/approval/decide":
                 return self._op_approve(role, me, body)
             if path == "/api/headcount/submit":
@@ -566,6 +582,64 @@ class _Handler(BaseHTTPRequestHandler):
                            "message": f"已重试：任务重入 {assignee} 队列"
                                       f"（第 {task.review_round}/{MAX_REVIEW_ROUNDS} 轮）"})
 
+    def _op_urge(self, role: str, me, body: dict):
+        """催办：超期在飞任务 → 站内信通知承接人（事前干预）。
+
+        超时追责（验收时 -2 分）是事后诸葛；超期的价值在于还来得及
+        催——老板看到红牌点一下，承接人立刻收到催办信。
+        """
+        from ..core.task import WAITING_HUMAN
+        from ..core.messenger import send
+        from ..core.task import utcnow
+        from ..core.permission import PermissionDenied
+
+        if role == rbac.STAFF:
+            return self._error(403, "员工不可催办任务（找老板或部门负责人）")
+        task_id = str(body.get("id", "")).strip()
+        if not task_id:
+            return self._error(400, "缺少 id")
+        task = self.store.load_task(task_id)
+        if not task:
+            return self._error(404, f"任务不存在：{task_id}")
+        if task.state not in {ASSIGNED, DOING, REPORTING, WAITING_HUMAN}:
+            return self._error(409, f"任务状态 {task.state} 无需催办（仅在飞任务）")
+        if not task.due_at:
+            return self._error(409, "任务未设截止时间，无超期口径")
+        # 超期判定（口径与验收时效积分一致：done > due 即超期）
+        due = _parse_dt(task.due_at)
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        if due is None or now_dt <= due:
+            return self._error(409, "任务尚未超期，无需催办")
+        assignee = task.assignee
+        if not assignee:
+            return self._error(409, "任务未指派承接人，无法催办")
+        if role == rbac.MANAGER and assignee not in rbac.dept_members(self.store, me):
+            return self._error(403, "只能催办本部门成员的任务")
+        # 发件人：登录者；免鉴权模式（老板视角）依次找在职 admin /
+        # 任意在职人类员工代发（消息系统要求发件人是真实在职员工）
+        sender_id = me.id if me is not None else None
+        if sender_id is None:
+            emps = [e for e in self.store.list_employees() if e.status == "active"]
+            boss = next((e for e in emps
+                         if e.permissions.get("role") == "admin"), None)
+            sender = boss or next((e for e in emps if e.kind == "human"), None)
+            if sender is None:
+                return self._error(409, "无在职员工可代发催办信")
+            sender_id = sender.id
+        days = (now_dt - due).total_seconds() / 86400
+        overdue = f"{days:.0f} 天" if days >= 1 else f"{days * 24:.0f} 小时"
+        due_show = task.due_at[:16].replace("T", " ")
+        try:
+            send(self.store, sender_id, assignee,
+                 f"【催办】任务 {task.id}《{task.title}》已超期 {overdue}"
+                 f"（截止 {due_show}），请尽快交付或联系老板说明。",
+                 task_id=task.id)
+        except (ValueError, KeyError, PermissionDenied) as e:
+            return self._error(409, f"催办信发送失败：{e}")
+        return self._json({"id": task.id, "state": task.state,
+                           "assignee": assignee,
+                           "message": f"已催办 {assignee}（超期 {overdue}）"})
+
     def _op_report(self, role: str, me, body: dict):
         """人类员工汇报交付：ASSIGNED → DOING → REPORTING（等验收）。
 
@@ -735,6 +809,76 @@ class _Handler(BaseHTTPRequestHandler):
             })
         return sorted(depts.values(), key=lambda d: d["department"])
 
+    def _payroll(self, u, role: str, me, csv_out: bool = False):
+        """月度绩效报表（发薪/面谈口径）：ledger 周期统计按员工汇总。
+
+        ledger.stats_between 一直在（财务周报在用），但看板从未暴露
+        员工维度的月度汇总——发薪、绩效面谈没有数据抓手。
+        可见范围同绩效面板：admin 全公司 / manager 本部门 / staff 本人；
+        免鉴权（老板视角）= 全公司。month=YYYY-MM（缺省本月），
+        旧数据（无时间戳）不计入周期，历史累计看绩效面板。
+        """
+        import calendar
+        q = parse_qs(u.query)
+        month = q.get("month", [""])[0].strip()
+        if not month:
+            month = datetime.date.today().strftime("%Y-%m")
+        try:
+            year, mon = int(month[:4]), int(month[5:7])
+            assert len(month) == 7 and month[4] == "-" and 1 <= mon <= 12
+        except (ValueError, AssertionError):
+            return self._error(400, "month 格式无效（YYYY-MM，如 2026-08）")
+        last = calendar.monthrange(year, mon)[1]
+        start = f"{year:04d}-{mon:02d}-01T00:00:00+00:00"
+        end = f"{year:04d}-{mon:02d}-{last:02d}T23:59:59+00:00"
+
+        emps = self.store.list_employees()
+        if role == rbac.MANAGER and me is not None:
+            allowed = set(rbac.dept_members(self.store, me)) | {me.id}
+            emps = [e for e in emps if e.id in allowed]
+        elif role == rbac.STAFF and me is not None:
+            emps = [e for e in emps if e.id == me.id]
+        rows = []
+        for e in sorted(emps, key=lambda x: x.id):
+            s = self.ledger.stats_between(e.id, start, end)
+            rows.append({
+                "id": e.id, "name": e.name, "kind": e.kind,
+                "department": e.department or "—",
+                **s,
+            })
+        if not csv_out:
+            return self._json({"month": month,
+                               "period": {"start": start, "end": end},
+                               "rows": rows})
+        # CSV（发薪表可直接下载）：BOM 防 Excel 中文乱码
+        import csv as _csv
+        import io as _io
+        buf = _io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow(["员工ID", "姓名", "类型", "部门", "完成数", "总成本",
+                    "平均评分", "按时数", "限期数", "按时完成率",
+                    "积分", "驳回数"])
+        for r in rows:
+            rate = r["on_time_rate"]
+            w.writerow([
+                r["id"], r["name"], "AI" if r["kind"] == "ai" else "人类",
+                r["department"], r["completion_count"],
+                f"{r['total_cost']:.2f}", r["avg_score"] or "",
+                r["on_time_count"], r["due_count"],
+                f"{rate * 100:.0f}%" if rate is not None else "",
+                r["points"], r["rejection_count"],
+            ])
+        body = ("\ufeff" + buf.getvalue()).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header(
+            "Content-Disposition",
+            f'attachment; filename="laoban-payroll-{month}.csv"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return None
+
     def _who_required(self, u) -> str | None:
         who = parse_qs(u.query).get("who", [""])[0]
         if not who:
@@ -852,6 +996,9 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(reqs)
         if u.path == "/api/report":
             return self._json(self._report(role, me))
+        if u.path in ("/api/report/payroll", "/api/report/payroll.csv"):
+            return self._payroll(u, role, me,
+                                 csv_out=u.path.endswith(".csv"))
         if u.path == "/api/points":
             # 积分/ROI 榜：可见范围同绩效面板（admin 全量 / manager 本部门 / staff 本人）
             from ..core.points import leaderboard

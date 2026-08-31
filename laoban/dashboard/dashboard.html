@@ -318,6 +318,19 @@
       </tr></thead><tbody></tbody></table>
     </section>
 
+    <section class="sheet" id="payrollSection">
+      <h2>月度绩效报表<span class="hint">发薪 / 绩效面谈口径 · 按月统计</span></h2>
+      <p class="form-row">
+        <input id="payrollMonth" type="month" style="width:16%" />
+        <button onclick="loadPayroll()">载入月报</button>
+        <button class="vermilion" onclick="exportPayroll()">导出 CSV</button>
+      </p>
+      <table id="payroll"><thead><tr>
+        <th>员工</th><th>类型</th><th>部门</th><th>完成数</th><th>总成本</th><th>平均评分</th><th>按时完成率</th><th>积分</th><th>驳回数</th>
+      </tr></thead><tbody></tbody></table>
+      <p id="payrollMeta" class="hint"></p>
+    </section>
+
     <section class="sheet" id="pointsSection">
       <h2>奖励积分榜<span class="hint">人类 / AI 分榜 · ROI 统一对比</span></h2>
       <p id="ptsSummary"></p>
@@ -456,14 +469,38 @@
       return ` <span class="${cls}" title="等验收时长（超 48 时标红）">⏱${txt}</span>`;
     }
 
-    // 待验收积压计数：任务台账标题一眼看到交付黑洞
+    // 在飞任务超期小时数（>0 = 已超期）：assigned/doing/reporting/waiting_human
+    // 且过了 due_at。口径与验收时效积分一致；无限期任务不参与。
+    function overdueHours(t) {
+      if (!['assigned', 'doing', 'reporting', 'waiting_human'].includes(t.state)
+          || !t.due_at) return 0;
+      const h = (Date.now() - new Date(t.due_at).getTime()) / 3600000;
+      return isFinite(h) && h > 0 ? h : 0;
+    }
+
+    // 超期红牌：事前预警（验收追责是事后诸葛，超期的价值在于还来得及催）
+    function overdueBadge(t) {
+      const h = overdueHours(t);
+      if (!h) return '';
+      const days = Math.floor(h / 24);
+      const txt = days >= 1 ? `超期${days}天` : `超期${Math.max(1, Math.round(h))}时`;
+      const due = esc(t.due_at.slice(0, 16).replace('T', ' '));
+      return ` <span class="wait-badge late" title="截止 ${due} 已过">⚠${txt}</span>`;
+    }
+
+    // 待验收积压 + 超期预警计数：任务台账标题一眼看到交付黑洞和风险
     function backlogNote(ts) {
-      const n = ts.filter(t => t.state === 'reporting').length;
-      if (!n) return '';
-      const worst = Math.max(...ts.filter(t => t.state === 'reporting')
-        .map(t => (Date.now() - new Date(t.updated_at).getTime()) / 3600000));
-      const worstTxt = isFinite(worst) ? `，最老 ${Math.round(worst)} 时` : '';
-      return ` <span class="hint">待验收 ${n} 件${worstTxt}</span>`;
+      const rp = ts.filter(t => t.state === 'reporting');
+      const od = ts.filter(t => overdueHours(t) > 0);
+      const parts = [];
+      if (rp.length) {
+        const worst = Math.max(...rp.map(t =>
+          (Date.now() - new Date(t.updated_at).getTime()) / 3600000));
+        const worstTxt = isFinite(worst) ? `，最老 ${Math.round(worst)} 时` : '';
+        parts.push(`待验收 ${rp.length} 件${worstTxt}`);
+      }
+      if (od.length) parts.push(`超期 ${od.length} 件`);
+      return parts.length ? ` <span class="hint">${parts.join('，')}</span>` : '';
     }
 
     async function load() {
@@ -472,12 +509,19 @@
       const tasks = Array.isArray(ts) ? ts : [];
       document.querySelector('#tasksSection h2').innerHTML =
         '任务台账' + backlogNote(tasks);
-      document.querySelector('#tasks tbody').innerHTML = tasks.map(t =>
-        `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td>` +
+      document.querySelector('#tasks tbody').innerHTML = tasks.map(t => {
+        const acts = [];
+        if (t.state === 'blocked') {
+          acts.push(`<button onclick="retryTask('${esc(t.id)}')">重新执行</button>`);
+        } else if (overdueHours(t) > 0) {
+          acts.push(`<button class="vermilion" onclick="urgeTask('${esc(t.id)}')">催办</button>`);
+        }
+        return `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td>` +
         `<td>${esc(STATE_LABEL[t.state] || t.state)}${waitBadge(t)}${t.block_reason ? ` <span class="hint" title="${esc(t.block_reason)}">ⓧ原因</span>` : ''}</td>` +
-        `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}</td>` +
+        `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}${overdueBadge(t)}</td>` +
         `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td>` +
-        `<td>${t.state === 'blocked' ? `<button onclick="retryTask('${esc(t.id)}')">重新执行</button>` : '—'}</td></tr>`).join('');
+        `<td>${acts.length ? acts.join(' ') : '—'}</td></tr>`;
+      }).join('');
       const es = await (await fetch('/api/employees')).json().catch(() => []);
       const roster = Array.isArray(es) ? es : [];
       document.querySelector('#employees tbody').innerHTML = roster.map(e =>
@@ -496,6 +540,7 @@
       await loadApprovals();
       await loadHeadcount();
       await loadPerf();
+      await loadPayroll();
       await loadPoints();
       await loadFinance();
       await loadPlans();
@@ -645,6 +690,11 @@
       opFeedback(ok, data, status);
     }
 
+    async function urgeTask(id) {
+      const { ok, data, status } = await opPost('/api/task/urge', { id });
+      opFeedback(ok, data, status);
+    }
+
     async function decideApproval(id, approved) {
       const opinion = prompt(approved ? '审批意见（可空）：' : '驳回理由（可空）：') || '';
       const { ok, data, status } = await opPost('/api/approval/decide',
@@ -736,6 +786,38 @@
           `<td>${s.avg_score ? s.avg_score.toFixed(1) : '—'}</td>` +
           `<td>${pctOrDash(s.on_time_rate)}</td></tr>`).join('')
         : '<tr><td colspan="8" class="empty">暂无绩效数据（验收/审批后记账）</td></tr>';
+    }
+
+    async function loadPayroll() {
+      // 月度绩效报表：发薪/面谈口径（ledger 周期统计），可导 CSV
+      const inp = document.getElementById('payrollMonth');
+      if (!inp.value) inp.value = new Date().toISOString().slice(0, 7);
+      const month = inp.value;
+      const resp = await fetch(`/api/report/payroll?month=${encodeURIComponent(month)}`);
+      if (!resp.ok) {
+        document.querySelector('#payroll tbody').innerHTML =
+          '<tr><td colspan="9" class="empty">暂无数据</td></tr>';
+        return;
+      }
+      const data = await resp.json();
+      const pctOrDash = v => v === null || v === undefined ? '—' : (v * 100).toFixed(0) + '%';
+      document.querySelector('#payroll tbody').innerHTML = data.rows.length
+        ? data.rows.map(r =>
+          `<tr><td>${esc(r.name || r.id)} <span class="hint">${esc(r.id)}</span></td>` +
+          `<td>${r.kind === 'ai' ? 'AI' : '人类'}</td><td>${esc(r.department)}</td>` +
+          `<td>${r.completion_count}</td><td>${Number(r.total_cost).toFixed(2)}</td>` +
+          `<td>${r.avg_score || '—'}</td><td>${pctOrDash(r.on_time_rate)}</td>` +
+          `<td>${r.points}</td><td>${r.rejection_count}</td></tr>`).join('')
+        : `<tr><td colspan="9" class="empty">${esc(month)} 无记录（当月无验收/积分流水）</td></tr>`;
+      document.getElementById('payrollMeta').textContent =
+        `统计周期 ${data.period.start.slice(0, 10)} ~ ${data.period.end.slice(0, 10)}` +
+        '（周期内验收记账口径；历史累计看绩效面板）';
+    }
+
+    function exportPayroll() {
+      const inp = document.getElementById('payrollMonth');
+      if (!inp.value) inp.value = new Date().toISOString().slice(0, 7);
+      window.open(`/api/report/payroll.csv?month=${encodeURIComponent(inp.value)}`);
     }
 
     async function loadPoints() {

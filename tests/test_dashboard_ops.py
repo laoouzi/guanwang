@@ -243,6 +243,93 @@ class TestOpsFreeAuth(unittest.TestCase):
         status, _ = self.client.post("/api/task/retry", {"id": "X"})
         self.assertEqual(status, 404)
 
+    def test_urge_overdue_task_sends_message(self):
+        """催办闭环：超期在飞任务一键催办 → 承接人收件箱收到催办信。"""
+        from laoban.core.messenger import inbox
+        _, sub = self.client.post("/api/task/submit",
+                                  {"title": "拖了三年的活",
+                                   "due_at": "2023-01-01"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "emp-chen"})
+        status, body = self.client.post("/api/task/urge", {"id": tid})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["assignee"], "emp-chen")
+        self.assertIn("已催办", body["message"])
+        # 承接人收件箱：催办信带任务 id 与超期说明
+        box = inbox(self.store, "emp-chen")
+        hit = [m for m in box if m.get("task_id") == tid and "催办" in m["content"]]
+        self.assertEqual(len(hit), 1)
+        self.assertIn("超期", hit[0]["content"])
+
+    def test_urge_rejects_not_overdue_or_wrong_state(self):
+        # 未超期（截止在未来）
+        _, sub = self.client.post("/api/task/submit",
+                                  {"title": "还没到期的活",
+                                   "due_at": "2099-01-01"})
+        self.client.post("/api/task/assign", {"id": sub["id"], "to": "emp-chen"})
+        status, body = self.client.post("/api/task/urge", {"id": sub["id"]})
+        self.assertEqual(status, 409)
+        self.assertIn("尚未超期", body["error"])
+        # 无截止
+        _, sub2 = self.client.post("/api/task/submit", {"title": "无限期"})
+        self.client.post("/api/task/assign", {"id": sub2["id"], "to": "emp-chen"})
+        status, body = self.client.post("/api/task/urge", {"id": sub2["id"]})
+        self.assertEqual(status, 409)
+        self.assertIn("未设截止", body["error"])
+        # 待分拣（不在飞）
+        _, sub3 = self.client.post("/api/task/submit", {"title": "未派发"})
+        status, _ = self.client.post("/api/task/urge", {"id": sub3["id"]})
+        self.assertEqual(status, 409)
+        # 不存在
+        status, _ = self.client.post("/api/task/urge", {"id": "X"})
+        self.assertEqual(status, 404)
+
+    def test_payroll_monthly_report(self):
+        """月度绩效报表：JSON 周期统计 + CSV 导出（发薪口径）。"""
+        # 先产生一笔本月记账：提交→派单→验收
+        _, sub = self.client.post("/api/task/submit", {"title": "月报口径"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "dev"})
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="dev")
+        self.store.save_task(t)
+        self.client.post("/api/task/accept", {"id": tid, "score": 4})
+        base = self.client.get("/api/perf")[1]["dev"]["completion_count"]
+
+        status, body = self.client.get("/api/report/payroll")
+        self.assertEqual(status, 200)
+        self.assertIn("rows", body)
+        by_id = {r["id"]: r for r in body["rows"]}
+        self.assertIn("dev", by_id)
+        self.assertGreaterEqual(by_id["dev"]["completion_count"], 1)
+        self.assertEqual(by_id["dev"]["name"], "阿码")
+        # 全员都在（含当月 0 记录的——发薪表要看全名单）
+        self.assertIn("emp-wang", by_id)
+        self.assertEqual(by_id["emp-wang"]["completion_count"], 0)
+
+        # CSV：BOM + 表头 + 数据行 + 附件下载头
+        import urllib.request
+        req = urllib.request.Request(
+            f"{self.client.base}/api/report/payroll.csv")
+        with urllib.request.urlopen(req) as r:
+            self.assertEqual(r.status, 200)
+            self.assertIn("text/csv", r.headers["Content-Type"])
+            self.assertIn("attachment", r.headers["Content-Disposition"])
+            raw = r.read().decode("utf-8-sig")
+        lines = raw.strip().splitlines()
+        self.assertEqual(lines[0].split(",")[:2], ["员工ID", "姓名"])
+        self.assertTrue(any(l.startswith("dev,") for l in lines[1:]))
+        # 非法月份
+        status, _ = self.client.get("/api/report/payroll?month=2026-13")
+        self.assertEqual(status, 400)
+        # 合法指定月份（当月）
+        import datetime as _dt
+        this = _dt.date.today().strftime("%Y-%m")
+        status, body = self.client.get(f"/api/report/payroll?month={this}")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(
+            {r["id"]: r for r in body["rows"]}["dev"]["completion_count"], 1)
+
     def test_file_ledger_persists(self):
         """记账后新 server 实例（模拟重启）能读到旧账。"""
         # 本测试自证：先走一遍完整验收产生账目
@@ -307,6 +394,40 @@ class TestOpsRbac(unittest.TestCase):
         c = self._login("emp-chen", "pw-chen")
         status, _ = c.post("/api/task/retry", {"id": tid})
         self.assertEqual(status, 403)
+
+    def test_staff_cannot_urge(self):
+        a = self._login("boss", "pw-boss")
+        _, sub = a.post("/api/task/submit",
+                        {"title": "要催的任务", "due_at": "2023-01-01"})
+        tid = sub["id"]
+        a.post("/api/task/assign", {"id": tid, "to": "emp-chen"})
+        c = self._login("emp-chen", "pw-chen")
+        status, _ = c.post("/api/task/urge", {"id": tid})
+        self.assertEqual(status, 403)
+        # 老板可催，催办信发件人是老板本人
+        status, body = a.post("/api/task/urge", {"id": tid})
+        self.assertEqual(status, 200)
+        from laoban.core.messenger import inbox
+        hit = [m for m in inbox(self.store, "emp-chen")
+               if m.get("task_id") == tid]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0]["from"], "boss")
+
+    def test_payroll_scope_by_role(self):
+        """月报可见范围：admin 全公司 / manager 本部门 / staff 仅本人。"""
+        c = self._login("boss", "pw-boss")
+        status, body = c.get("/api/report/payroll")
+        self.assertEqual(status, 200)
+        ids = {r["id"] for r in body["rows"]}
+        self.assertTrue(ids >= {"boss", "mgr-dev", "dev", "emp-chen",
+                                "emp-xiaoli", "fin", "emp-wang"})
+        m = self._login("mgr-dev", "pw-mgr")
+        _, body = m.get("/api/report/payroll")
+        self.assertEqual({r["id"] for r in body["rows"]},
+                         {"mgr-dev", "dev", "emp-chen", "emp-xiaoli"})
+        s = self._login("emp-chen", "pw-chen")
+        _, body = s.get("/api/report/payroll")
+        self.assertEqual({r["id"] for r in body["rows"]}, {"emp-chen"})
 
     def test_manager_assign_only_own_dept(self):
         m = self._login("mgr-dev", "pw-mgr")
