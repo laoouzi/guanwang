@@ -98,6 +98,11 @@
     <th>员工</th><th>完成数</th><th>总成本</th><th>平均耗时</th><th>驳回率</th><th>人类介入率</th>
   </tr></thead><tbody></tbody></table>
 
+  <h2 id="reportSection">复盘报告（按部门）</h2>
+  <table id="report"><thead><tr>
+    <th>部门</th><th>完成数</th><th>驳回次数</th><th>教训数</th><th>自动复盘</th><th>成员明细</th>
+  </tr></thead><tbody></tbody></table>
+
   <h2>组织架构</h2>
   <div id="org"></div>
 
@@ -178,6 +183,7 @@
       await loadApprovals();
       await loadHeadcount();
       await loadPerf();
+      await loadReport();
     }
 
     async function loadMe() {
@@ -283,6 +289,18 @@
         document.getElementById('acceptComment').value = '';
       }
       opFeedback(ok, data, status);
+      // 复盘结论直接展示：老板验收即看到员工学到了什么（低分教训下次生效）
+      if (ok && data.review && data.review.learned) {
+        const el = document.getElementById('opMsg');
+        const tag = data.review.auto ? '（AI 自动复盘）' : '（采纳验收评语）';
+        el.textContent += `\n复盘${tag}：${data.review.learned}`;
+      }
+      // 晋升申请提示：连续验收通过 → 自动申请升自主等级，去审批队列决策
+      if (ok && data.promotion) {
+        const el = document.getElementById('opMsg');
+        el.textContent += `\n📈 晋升申请已自动提交：${data.promotion.summary}（见审批队列）`;
+        el.style.color = '#2a7a2a';
+      }
     }
 
     async function decideApproval(id, approved) {
@@ -373,6 +391,24 @@
           `<td>${s.total_cost.toFixed(2)}</td><td>${s.avg_elapsed.toFixed(1)}s</td>` +
           `<td>${pct(s.rejection_rate)}</td><td>${pct(s.human_intervention_rate)}</td></tr>`).join('')
         : '<tr><td colspan="6" class="empty">暂无绩效数据（验收/审批后记账）</td></tr>';
+    }
+
+    async function loadReport() {
+      const resp = await fetch('/api/report');
+      if (!resp.ok) return;
+      const rows = await resp.json();
+      const AUTONOMY = { supervised: '全审批', semi: '半自主', full: '高自主' };
+      document.querySelector('#report tbody').innerHTML = rows.length
+        ? rows.map(d => {
+          const members = d.members.map(m =>
+            `${esc(m.name)}（${m.kind === 'human' ? '人' : 'AI'}·${esc(AUTONOMY[m.autonomy_level] || m.autonomy_level)}）：完成${m.completion_count} · 教训${m.lessons}` +
+            (m.latest_lesson ? ` · 最新：${esc(m.latest_lesson.slice(0, 40))}` : '')
+          ).join('<br>');
+          return `<tr><td>${esc(d.department)}</td><td>${d.completion_count}</td>` +
+                 `<td>${d.rejections}</td><td>${d.lessons}</td><td>${d.auto_reviews}</td>` +
+                 `<td style="max-width:40%">${members || '-'}</td></tr>`;
+        }).join('')
+        : '<tr><td colspan="6" class="empty">暂无复盘数据（验收后沉淀）</td></tr>';
     }
 
     async function doLogin() {

@@ -46,6 +46,7 @@ class Ledger:
             "total_cost": total_cost,
             "avg_elapsed": avg_elapsed,
             "rejection_rate": rejection_rate,
+            "rejection_count": rejections,
             "human_intervention_rate": intervention_rate,
         }
 

@@ -290,17 +290,22 @@ class _Handler(BaseHTTPRequestHandler):
             # 否则模板降级），下次执行经 render_experience 注入生效
             emp = self.store.load_employee(assignee)
             review = None
+            promotion = None
             if emp:
                 review = review_and_learn(self.store, emp, task,
                                           score=score, comment=comment,
                                           gateway=self.gateway)
+                # 晋升通道：连续验收通过 → 自动申请升自主等级（老板审批）
+                from ..core.promotion import maybe_request_promotion
+                promotion = maybe_request_promotion(self.store, emp)
                 self.store.save_employee(emp)
             self.ledger.record_completion(assignee, task_id=task_id)
             self.ledger.record_step(assignee)
         return self._json({"id": task.id, "state": task.state,
                            "assignee": assignee,
                            "message": f"任务已完成（评分 {score}/5）",
-                           "review": review})
+                           "review": review,
+                           "promotion": promotion})
 
     def _op_approve(self, role: str, me, body: dict):
         """审批决策：仅 admin。落审批日志 + 账本记人类介入。"""
@@ -319,13 +324,21 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, f"待审批单不存在或已处理：{log_id}")
         log.log_decision(log_id, approver=self._actor(me),
                          approved=approved, opinion=opinion)
+        # 晋升申请通过 → 立即生效（写回 autonomy_level）
+        message = "已通过" if approved else "已驳回"
+        if approved and entry.request.get("type") == "晋升申请":
+            from ..core.promotion import apply_promotion
+            result = apply_promotion(self.store, entry.request)
+            if result:
+                message = (f"已通过：{result['emp_id']} 自主等级升至 "
+                           f"{result['autonomy_level']}（低风险操作免审批）")
         requester = entry.request.get("requester", "")
         if requester:
             self.ledger.record_human_intervention(requester, "approval")
             self.ledger.record_step(requester)
         return self._json({"id": log_id,
                            "status": "approved" if approved else "rejected",
-                           "message": "已通过" if approved else "已驳回"})
+                           "message": message})
 
     def _op_headcount_submit(self, role: str, me, body: dict):
         """提交编制申请：manager/admin（staff 无部门管理权，不可提）。"""
@@ -372,6 +385,41 @@ class _Handler(BaseHTTPRequestHandler):
                                reason=reason)
         return self._json({"id": req_id, "status": "rejected",
                            "message": f"已驳回{('：' + reason) if reason else ''}"})
+
+    def _report(self, role: str, me) -> list[dict]:
+        """部门级复盘报告：绩效 + 教训沉淀（按部门聚合）。
+
+        可见范围与绩效面板一致：admin 全公司；manager 本部门；staff 仅本人。
+        """
+        stats_all = self.ledger.stats_all()
+        depts: dict[str, dict] = {}
+        for e in self.store.list_employees():
+            if role == rbac.MANAGER and me is not None \
+                    and e.department != me.department:
+                continue
+            if role == rbac.STAFF and (me is None or e.id != me.id):
+                continue
+            st = stats_all.get(e.id, {})
+            exps = e.memory.get("experiences", [])
+            lessons = [x for x in exps if x.get("outcome") == "failure"]
+            wins = [x for x in exps if x.get("outcome") != "failure"]
+            d = depts.setdefault(e.department or "（未分配）", {
+                "department": e.department or "（未分配）",
+                "completion_count": 0, "lessons": 0, "auto_reviews": 0,
+                "rejections": 0, "members": [],
+            })
+            d["completion_count"] += st.get("completion_count", 0)
+            d["lessons"] += len(lessons)
+            d["auto_reviews"] += sum(1 for x in exps if x.get("auto"))
+            d["rejections"] += st.get("rejection_count", 0)
+            d["members"].append({
+                "id": e.id, "name": e.name, "kind": e.kind,
+                "completion_count": st.get("completion_count", 0),
+                "lessons": len(lessons), "wins": len(wins),
+                "autonomy_level": e.permissions.get("autonomy_level", "supervised"),
+                "latest_lesson": (lessons[-1].get("learned", "") if lessons else ""),
+            })
+        return sorted(depts.values(), key=lambda d: d["department"])
 
     def _who_required(self, u) -> str | None:
         who = parse_qs(u.query).get("who", [""])[0]
@@ -476,6 +524,8 @@ class _Handler(BaseHTTPRequestHandler):
             if role != rbac.ADMIN and me is not None:
                 reqs = [r for r in reqs if r.get("requester") == me.id]
             return self._json(reqs)
+        if u.path == "/api/report":
+            return self._json(self._report(role, me))
         if u.path == "/api/perf":
             # 绩效面板：admin 全公司；manager 本部门；staff 仅本人
             stats_all = self.ledger.stats_all()
