@@ -225,6 +225,14 @@
               padding: 1px 8px; cursor: pointer; white-space: nowrap;
               line-height: 1.6; text-decoration: none; }
     .tl-act:hover { border-color: var(--ink); color: var(--ink); }
+    /* 时间线内联回复框：不跳区，就地回信 */
+    .tl-acts { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .tl-reply { display: inline-flex; align-items: center; gap: 6px;
+                margin: 2px 0; width: 100%; }
+    .tl-reply textarea { flex: 1 1 auto; min-width: 140px; font-size: 12.5px;
+                         padding: 5px 8px; resize: none; font-family: var(--serif); }
+    .tl-reply button { padding: 4px 10px; font-size: 12px; }
+    .tl-reply-ok { color: var(--moss); font-size: 12px; font-family: var(--mono); }
 
     /* ---- 操作反馈：朱批 ---- */
     #opMsg {
@@ -341,6 +349,10 @@
           <input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)" /> 自动刷新
         </label>
         <span id="autoMeta">未刷新</span>
+        <span style="margin-left:14px">
+          <button id="pushBtn" onclick="togglePush()" title="开启后收件人不在看板前也能收到新消息系统通知">开启离线通知</button>
+          <span id="pushMeta"></span>
+        </span>
       </p>
     </div>
 
@@ -801,11 +813,12 @@
     }
 
     function tlNodeActs(n) {
-      // 节点操作签（HTML）：回信谁就生成谁的签；本人节点不出签
+      // 节点操作签（HTML）：回信谁就生成谁的签；本人节点不出签。
+      // 点击就地展开内联回复框（不跳区），回车/点发送即回信。
       const me = window._me?.id;
       const chip = (id, label) =>
         (id && id !== me && n.kind !== 'submit')
-          ? `<a class="tl-act" href="#chatSection" title="给 ${esc(id)} 发消息" onclick="tlChat('${esc(id)}');return false;">${esc(label)}</a>`
+          ? `<a class="tl-act" href="#" title="给 ${esc(id)} 内联回复" onclick="tlReplyInline('${esc(id)}', this);return false;">${esc(label)}</a>`
           : '';
       if (n.kind === 'urge') {
         // 升级节点直接回复：催的是承接人，抄送的是上级——都可一键回信
@@ -814,14 +827,68 @@
       return chip(n.actor, `找 ${n.actor}`);   // 流转节点：找该环节操作人问进度
     }
 
-    // 时间线跳转①：带收件人进对话区（登录过顺手带出两人的历史来往）
-    function tlChat(emp) {
+    // 时间线内联回复：点操作签就地展开回复框（不再跳到对话区）
+    function tlReplyInline(emp, anchor) {
       if (!emp) return;
-      const to = document.getElementById('chatTo');
-      if (to) to.value = emp;
-      document.getElementById('chatSection').scrollIntoView({ behavior: 'smooth' });
-      setTimeout(() => document.getElementById('chatContent')?.focus(), 400);
-      if (window._me?.id) loadChatHistory();
+      const wrap = anchor.closest('.tl-acts');
+      if (!wrap) return;
+      // 已展开 → 再点收起（toggle）；同一节点只保留一个回复框
+      const existing = wrap.querySelector('.tl-reply');
+      if (existing) { existing.remove(); return; }
+      const box = document.createElement('div');
+      box.className = 'tl-reply';
+      const ta = document.createElement('textarea');
+      ta.rows = 1;
+      ta.placeholder = `回复 ${emp}…（Enter 发送，Shift+Enter 换行）`;
+      const btn = document.createElement('button');
+      btn.textContent = '发送';
+      const send = () => tlReplySend(emp, ta, btn, box);
+      ta.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+      });
+      btn.onclick = send;
+      box.appendChild(ta); box.appendChild(btn);
+      wrap.appendChild(box);
+      ta.focus();
+    }
+
+    // 内联回复发送：走与对话区同一个 /api/chat，后端权限口径一致
+    async function tlReplySend(to, ta, btn, box) {
+      const content = (ta.value || '').trim();
+      if (!content) { ta.focus(); return; }
+      const from = window._me?.id || document.getElementById('chatFrom').value.trim();
+      if (!from) { alert('请先在对话区填写/登录我的员工 id'); return; }
+      btn.disabled = true;
+      try {
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from, to, content }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || `HTTP ${resp.status}`);
+          btn.disabled = false;
+          return;
+        }
+        const note = data.reply == null
+          ? '已投递到对方收件箱' : (data.reply || '已发送');
+        box.innerHTML = `<span class="tl-reply-ok">✓ 已回 ${esc(to)}：${esc(note)}</span>`;
+        // 对话里当场读过的回复 = 已读（与 sendChat 同口径）
+        if (window._me?.id && from === window._me.id) {
+          try {
+            await fetch('/api/messages/read', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ who: from }),
+            });
+          } catch (e) { /* 失败由下轮刷新兜底 */ }
+          loadUnread();
+        }
+        loadTasks();
+      } catch (e) {
+        btn.disabled = false;
+        alert('请求失败：' + e.message);
+      }
     }
 
     // 时间线跳转②：看承接人工位队列（staff 的队列框锁定本人，不越权代查）
@@ -1660,9 +1727,95 @@
     // ---- PWA：注册 Service Worker（应用壳离线可开；注册失败静默降级）----
     if ('serviceWorker' in navigator) {
       addEventListener('load', () => {
-        navigator.serviceWorker.register('/sw.js').catch((e) =>
+        navigator.serviceWorker.register('/sw.js').then(() => renderPushState()).catch((e) =>
           console.info('SW 注册失败（不影响看板）：', e));
       });
+    }
+
+    // ---- Web Push：离线通知订阅/退订 ----
+    function urlBase64ToUint8Array(b64) {
+      const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+      const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+      const out = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+      return out;
+    }
+    function bufB64url(buf) {
+      let bin = '';
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+    function pushEmpId() {
+      return window._me?.id || document.getElementById('chatFrom').value.trim();
+    }
+    async function currentPushSub() {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+      const reg = await navigator.serviceWorker.ready;
+      return reg.pushManager.getSubscription();
+    }
+    async function renderPushState() {
+      const btn = document.getElementById('pushBtn');
+      if (!btn) return;
+      if (!('Notification' in window) || !('PushManager' in window)) {
+        btn.disabled = true; btn.textContent = '浏览器不支持通知'; return;
+      }
+      try {
+        const sub = await currentPushSub();
+        btn.textContent = sub ? '关闭离线通知' : '开启离线通知';
+      } catch (e) { /* 无 SW 时静默 */ }
+    }
+    async function togglePush() {
+      const btn = document.getElementById('pushBtn');
+      if (!('Notification' in window) || !('PushManager' in window)) {
+        alert('此浏览器不支持通知'); return;
+      }
+      const sub = await currentPushSub();
+      if (sub) {   // 已订阅 → 退订
+        const emp = pushEmpId();
+        try {
+          await fetch('/api/push/unsubscribe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ employee: emp, endpoint: sub.endpoint }),
+          });
+        } catch (e) { /* 服务端退订失败不阻断本地退订 */ }
+        await sub.unsubscribe();
+        document.getElementById('pushMeta').textContent = '已关闭';
+        renderPushState();
+        return;
+      }
+      // 未订阅 → 订阅
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { alert('未授予通知权限，无法开启离线通知'); return; }
+      const emp = pushEmpId();
+      if (!emp) { alert('请先登录或填写「我的员工 id」'); return; }
+      let publicKey = '';
+      try {
+        const r = await fetch('/api/push/vapid');
+        if (!r.ok) throw new Error('vapid ' + r.status);
+        publicKey = (await r.json()).public_key;
+      } catch (e) { alert('获取推送公钥失败：' + e.message); return; }
+      if (!publicKey) { alert('服务端未就绪 Web Push（缺加密库）'); return; }
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const ns = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+        const body = {
+          employee: emp, endpoint: ns.endpoint,
+          keys: { p256dh: bufB64url(ns.getKey('p256dh')), auth: bufB64url(ns.getKey('auth')) },
+        };
+        const r = await fetch('/api/push/subscribe', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { await ns.unsubscribe(); throw new Error((await r.json()).error || r.status); }
+        document.getElementById('pushMeta').textContent = '已开启';
+      } catch (e) {
+        alert('订阅失败：' + (e.message || e));
+      }
+      renderPushState();
     }
   </script>
 </body>

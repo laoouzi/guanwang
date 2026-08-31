@@ -29,6 +29,7 @@ from collections import deque
 from ..core.store import JsonStore
 from ..llm.gateway import LLMGateway
 from .binding import Bindings
+from .channel import IMChannel
 from .router import route_inbound
 
 DEFAULT_BASE = "https://open.feishu.cn"
@@ -143,8 +144,15 @@ def _decrypt_event(encrypt_b64: str, encrypt_key: str) -> dict:
     raise FeishuError("解密失败：密文或 encrypt_key 不正确")
 
 
-class FeishuWebhook:
-    """飞书事件回调处理器：URL 验证 + 消息事件 → router → 回信推回。"""
+class FeishuWebhook(IMChannel):
+    """飞书渠道：事件回调处理器（入站）+ 消息 API（出站）。
+
+    实现 IMChannel 统一接口——出站 send_text/send_text_chat 转发到内部
+    FeishuClient，入站走 handle。上层（notify / UrgeCenter / ChannelHub）
+    只认 IMChannel，不感知飞书具体实现。
+    """
+
+    platform = "feishu"
 
     def __init__(self, store: JsonStore, gateway: LLMGateway | None,
                  client: FeishuClient, bindings: Bindings,
@@ -161,6 +169,23 @@ class FeishuWebhook:
             "LAOBAN_FEISHU_BOT_OPEN_ID", "").strip()
         self._seen: deque[str] = deque(maxlen=_SEEN_CAP)
         self._seen_set: set[str] = set()
+
+    # ---- 出站（IMChannel 接口）：转发到 FeishuClient，异常吞掉返回 False ----
+    def send_text(self, im_user: str, text: str) -> bool:
+        try:
+            self.client.send_text(im_user, text)
+            return True
+        except Exception as e:
+            print(f"[IM:feishu] 推送失败（{im_user}）：{e!r}")
+            return False
+
+    def send_text_chat(self, chat_id: str, text: str) -> bool:
+        try:
+            self.client.send_text_chat(chat_id, text)
+            return True
+        except Exception as e:
+            print(f"[IM:feishu] 群聊推送失败（{chat_id}）：{e!r}")
+            return False
 
     def handle(self, body: dict, background: bool = True) -> tuple[int, dict]:
         """处理一条事件 JSON，返回 (HTTP 状态码, 响应体)。"""

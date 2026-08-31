@@ -39,3 +39,35 @@ self.addEventListener('fetch', (e) => {
       caches.match(e.request).then((hit) => hit || caches.match('/')))
   );
 });
+
+// ---- Web Push：离线通知 ----
+// 服务端推来的 JSON：{title, body, url}。收件人不在看板前也能收到系统通知。
+self.addEventListener('push', (e) => {
+  let data = { title: '老板账本', body: '有新消息' };
+  try {
+    if (e.data) { data = e.data.json(); }
+  } catch (_) { /* 非法载荷走默认文案 */ }
+  e.waitUntil(
+    self.registration.showNotification(data.title || '老板账本', {
+      body: data.body || '',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+      tag: 'laoban-msg',
+      data: { url: data.url || '/' },
+    })
+  );
+});
+
+// 点击通知：聚焦已开的看板页（跳回指定锚点），否则新开窗口
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || '/';
+  e.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const c of list) {
+        if ('navigate' in c) { c.navigate(url); c.focus(); return; }
+      }
+      return clients.openWindow(url);
+    })
+  );
+});

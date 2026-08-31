@@ -473,10 +473,15 @@ def main(argv: list[str] | None = None) -> int:
                     gw.register_provider(pid, MockLLM())
             print("演示模式（MockLLM）：未检测到 LLM Key，AI 员工按脚本自动执行"
                   "——设置 LAOBAN_MOONSHOT_API_KEY 等环境变量可切换真实 LLM")
-        # 飞书接入：事件回调 URL 填 http://<主机>:<端口>/api/im/webhook/feishu
+        # IM 渠道接入（飞书 + 企微/钉钉保留接口）：事件回调 URL 填
+        # http://<主机>:<端口>/api/im/webhook/<platform>
         feishu_hook = None
+        wecom_ch = None
+        dingtalk_ch = None
         from .im.binding import Bindings
         from .im.feishu import FeishuWebhook, feishu_from_env
+        from .im.wecom import wecom_from_env
+        from .im.dingtalk import dingtalk_from_env
         fs = feishu_from_env()
         if fs is not None:
             feishu_hook = FeishuWebhook(
@@ -487,9 +492,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"飞书接入已启用：事件回调 URL = http://<本机地址>:{args.port}/api/im/webhook/feishu"
                   "（需公网可达或内网穿透）")
         else:
-            print("未配置飞书（LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET），IM 渠道未启用")
+            print("未配置飞书（LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET），飞书渠道未启用")
+        # 企微 / 钉钉：接口已保留，凭证齐全即自动注册（当前为骨架桩，见 laoban/im/wecom.py、dingtalk.py）
+        wecom_ch = wecom_from_env()
+        dingtalk_ch = dingtalk_from_env()
+        if wecom_ch is not None:
+            print("企业微信渠道已注册（接口桩，凭证就绪后填 laoban/im/wecom.py 的 TODO 即接入）")
+        if dingtalk_ch is not None:
+            print("钉钉渠道已注册（接口桩，凭证就绪后填 laoban/im/dingtalk.py 的 TODO 即接入）")
         server = DashboardServer(st, port=args.port, gateway=gw,
-                                 feishu=feishu_hook, auth=AuthStore(st.root))
+                                 feishu=feishu_hook, wecom=wecom_ch,
+                                 dingtalk=dingtalk_ch, auth=AuthStore(st.root))
         # 自动运转引擎：有 LLM 即默认启动（--no-worker 关闭）
         worker = None
         if gw is not None and not args.no_worker:

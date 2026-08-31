@@ -1163,12 +1163,16 @@ class TestMessageIMNotify(unittest.TestCase):
         self.assertTrue(any("【新消息】" in t for _, t in self.fake.sent))
 
     def test_dashboard_installs_and_clears_notifier(self):
-        """看板构造：有 IM 客户端装钩子，无则清空（防上个测试串场）。"""
+        """看板构造：有渠道（IM 或 Web Push）装钩子，全无则清空（防上个测试串场）。"""
         from laoban.core import messenger
-        # 无 feishu → 钩子清空
+        from laoban.dashboard.webpush import WebPushManager
+        # 无 IM 渠道：是否装钩子取决于 Web Push 能力（crypto 缺失则清空）
         server = DashboardServer(self.st, port=0)
         server.shutdown()
-        self.assertIsNone(messenger._notifier)
+        if WebPushManager(self.st).enabled:
+            self.assertIsNotNone(messenger._notifier)
+        else:
+            self.assertIsNone(messenger._notifier)
         # 有 feishu → 钩子就位且能推
         server2 = DashboardServer(self.st, port=0, feishu=self.fake)
         server2.shutdown()
@@ -1247,12 +1251,12 @@ class TestPwaMounts(unittest.TestCase):
         self.assertIn("caches.match", sw)
 
     def test_frontend_mounts_tl_actions(self):
-        """#25 页面源码包含：时间线节点操作签 + 两个跳转函数。"""
+        """#29 页面源码包含：时间线节点操作签 + 内联回复 + 工位跳转。"""
         import urllib.request
         with urllib.request.urlopen(f"http://127.0.0.1:{self.server.port}/") as r:
             html = r.read().decode()
         self.assertIn("tlNodeActs", html)
-        self.assertIn("function tlChat", html)
+        self.assertIn("function tlReplyInline", html)   # 内联回复（不跳区）
         self.assertIn("function tlQueue", html)
         self.assertIn("回 ${n.escalated_to}", html)   # 升级节点直接回复
         self.assertIn("找 ${n.actor}", html)

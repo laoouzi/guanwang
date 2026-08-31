@@ -190,11 +190,14 @@ class UrgeCenter:
     共用一套判定，两条路径的升级口径完全一致。
     """
 
-    def __init__(self, store: JsonStore, feishu=None):
+    def __init__(self, store: JsonStore, hub=None, feishu=None):
         from ..im.binding import Bindings
+        from ..im.hub import build_hub
         self.store = store
-        self.feishu = feishu
         self.bindings = Bindings(store.root)
+        # hub 优先；未给 hub 但给了 feishu（旧参数）→ 包成单渠道 hub
+        self.hub = hub if hub is not None else (
+            build_hub(feishu=feishu, bindings=self.bindings) if feishu else None)
 
     def escalation_target(self, assignee_id: str, hops: int) -> str | None:
         """沿 reports_to 链向上找第 hops 跳的上级（0 = 直属上级）。
@@ -215,18 +218,11 @@ class UrgeCenter:
         return cur if self.store.load_employee(cur) else None
 
     def im_push(self, employee_id: str, text: str) -> bool:
-        """催办/升级信同步推 IM：有绑定 + 渠道客户端才推，失败不影响站内信。"""
-        if self.feishu is None:
+        """催办/升级信同步推 IM：走 ChannelHub 按绑定路由到对应渠道，
+        多渠道触达；无渠道/未绑定则 False，不影响站内信。"""
+        if self.hub is None:
             return False
-        im_user = self.bindings.lookup_by_employee("feishu", employee_id)
-        if not im_user:
-            return False
-        try:
-            self.feishu.send_text(im_user, text)
-            return True
-        except Exception as e:
-            print(f"[IM:feishu] 催办推送失败（{employee_id}）：{e!r}")
-            return False
+        return self.hub.push_employee(employee_id, text)
 
     def urge(self, task: Task, sender_id: str, now_dt, auto: bool = False) -> dict:
         """对超期在飞任务发一次催办（含升级链判定与 IM 推送）。
@@ -384,7 +380,7 @@ class _AutoUrgeSweeper(threading.Thread):
 class _Handler(BaseHTTPRequestHandler):
     store: JsonStore = None  # 由工厂注入
     gateway = None           # 可选：聊天端点需要 LLM 网关
-    feishu = None            # 可选：飞书事件回调（IM 渠道入口）
+    hub = None               # 可选：ChannelHub（多 IM 渠道入站/出站统一入口）
     auth = None              # 可选：口令库（设过任何口令即启用登录）
     sessions: dict = None    # 会话表 token → emp_id（DashboardServer 注入）
 
@@ -553,10 +549,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "question": result["question"],
                 "reply": result["reply"],
             })
-        if u.path == "/api/im/webhook/feishu":
-            if self.feishu is None:
-                return self._error(503, "未配置飞书接入（LAOBAN_FEISHU_APP_ID / LAOBAN_FEISHU_APP_SECRET）")
-            status, payload = self.feishu.handle(self._read_body())
+        if u.path.startswith("/api/im/webhook/"):
+            platform = u.path.rsplit("/", 1)[-1]
+            if self.hub is None or self.hub.get(platform) is None:
+                return self._error(503, f"未接入 IM 平台：{platform}")
+            status, payload = self.hub.handle(platform, self._read_body())
             return self._json(payload, status)
 
         if u.path == "/api/messages/read":
@@ -573,6 +570,62 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._error(403, "只能标记自己的收件箱为已读")
             from ..core.messenger import mark_read
             return self._json({"who": who, "read": mark_read(self.store, who)})
+
+        if u.path == "/api/org/sync":
+            # 组织同步手动触发：立即跑一轮 IM 通讯录 → 平台 Employee/Bindings。
+            # 与后台轮询（OrgSyncSweeper）同一套 sync_org，口径一致。
+            if self.auth and self.auth.enabled():
+                role, me = self._view()
+                if role != rbac.ADMIN:
+                    return self._error(403, "仅管理员可手动触发组织同步")
+            if not self.org_sources:
+                return self._error(503, "未接入任何组织同步数据源")
+            body = self._read_body()
+            sync_create = bool(body.get("sync_create", False))
+            from ..im.orgsync import sync_org
+            results = []
+            for src in self.org_sources:
+                try:
+                    r = sync_org(self.store, src, self.org_bindings,
+                                 sync_create=sync_create)
+                except Exception as e:   # 单个渠道失败不阻断其他渠道
+                    r = {"error": str(e)}
+                r["platform"] = src.platform
+                results.append(r)
+            return self._json({"results": results})
+
+        if u.path == "/api/push/subscribe":
+            body = self._read_body()
+            emp = str(body.get("employee", "")).strip()
+            endpoint = str(body.get("endpoint", "")).strip()
+            keys = body.get("keys") or {}
+            p256dh = str(keys.get("p256dh", "")).strip()
+            auth = str(keys.get("auth", "")).strip()
+            if not (emp and endpoint and p256dh and auth):
+                return self._error(400, "缺少 employee / endpoint / keys.p256dh / keys.auth")
+            if self.auth and self.auth.enabled():
+                me = self._session_emp()
+                if not me:
+                    return self._error(401, "请先登录")
+                if emp != me:
+                    return self._error(403, "只能订阅自己的推送")
+            self.webpush.subscribe(emp, endpoint, p256dh, auth)
+            return self._json({"ok": True, "employee": emp,
+                               "count": len(self.webpush.subscriptions(emp))})
+
+        if u.path == "/api/push/unsubscribe":
+            body = self._read_body()
+            emp = str(body.get("employee", "")).strip()
+            endpoint = str(body.get("endpoint", "")).strip()
+            if not (emp and endpoint):
+                return self._error(400, "缺少 employee / endpoint")
+            if self.auth and self.auth.enabled():
+                me = self._session_emp()
+                if not me:
+                    return self._error(401, "请先登录")
+                if emp != me:
+                    return self._error(403, "只能退订自己的推送")
+            return self._json({"ok": self.webpush.unsubscribe(emp, endpoint)})
 
         # ---- 任务操作 / 审批决策 / 编制申请（老板驾驶舱）----
         if u.path in ("/api/task/submit", "/api/task/assign",
@@ -1250,6 +1303,10 @@ class _Handler(BaseHTTPRequestHandler):
                                "kind": "", "title": "未设口令，无需登录",
                                "role": rbac.ADMIN})
 
+        # Web Push 公钥：客户端订阅用（非敏感，免登录，与 /api/me 同级）
+        if u.path == "/api/push/vapid":
+            return self._json({"public_key": self.webpush.public_key})
+
         # ---- 以下数据接口统一走视图权限（HTML 页面本身免登录，否则登录页打不开）----
         if u.path.startswith("/api/"):
             denied, (role, me) = self._require_view()
@@ -1459,22 +1516,37 @@ class _Handler(BaseHTTPRequestHandler):
 
 class DashboardServer:
     def __init__(self, store: JsonStore, port: int = 7891, gateway=None,
-                 feishu=None, auth=None):
-        center = UrgeCenter(store, feishu)
-        # 新消息 IM 离线摘要：注入进程级钩子（无 IM 客户端则清空，
-        # 保证上一个测试留下的钩子不串场）
+                 feishu=None, channels=None, wecom=None, dingtalk=None, auth=None,
+                 org_sources=None):
+        from ..im.binding import Bindings
+        from ..im.hub import build_hub
+        bindings = Bindings(store.root)
+        hub = build_hub(feishu=feishu, wecom=wecom, dingtalk=dingtalk,
+                        channels=channels, bindings=bindings)
+        center = UrgeCenter(store, hub=hub)
+        # Web Push 离线通知：收件人不在看板前也能收系统通知（PWA 能力）
+        from .webpush import WebPushManager
+        webpush = WebPushManager(store)
+        # 新消息 IM 离线摘要：注入进程级钩子（无渠道则清空，
+        # 保证上一个测试留下的钩子不串场）。IM 摘要 + Web Push 双通道。
         from ..core import messenger
         from ..im.notify import MessageNotifier
-        messenger.set_notifier(MessageNotifier(store, feishu) if feishu else None)
+        notifier = MessageNotifier(store, hub=hub, webpush=webpush) \
+            if (hub.platforms() or webpush.enabled) else None
+        messenger.set_notifier(notifier)
         handler = type("H", (_Handler,), {
-            "store": store, "gateway": gateway, "feishu": feishu,
+            "store": store, "gateway": gateway, "hub": hub,
             "auth": auth, "sessions": {},
             "ledger": FileLedger(store),   # 持久化绩效账本（验收/审批记账）
             "urge_center": center,         # 催办中枢（手动催与自动催共用）
+            "webpush": webpush,            # Web Push 订阅/推送管理
+            "org_sources": org_sources or [],  # 组织同步数据源（IM 通讯录）
+            "org_bindings": bindings,
         })
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.port = self.httpd.server_address[1]
         self.urge_center = center
+        self.hub = hub
         self._serving = False
         # 自动催办：随服务常驻（LAOBAN_AUTO_URGE=0 关闭；阈值/间隔/冷却可调）
         self._sweeper = None
@@ -1485,6 +1557,15 @@ class DashboardServer:
                 after_hours=_env_float("LAOBAN_AUTO_URGE_AFTER_HOURS", 24),
                 cooldown_hours=_env_float("LAOBAN_AUTO_URGE_COOLDOWN_HOURS", 24))
             self._sweeper.start()
+        # 组织同步轮询（LAOBAN_ORG_SYNC=0 关闭；间隔 LAOBAN_ORG_SYNC_SEC）
+        self._org_sweeper = None
+        if org_sources and os.environ.get("LAOBAN_ORG_SYNC", "1").strip() != "0":
+            from ..im.orgsync import OrgSyncSweeper
+            self._org_sweeper = OrgSyncSweeper(
+                store, org_sources, bindings,
+                interval_sec=max(10.0, _env_float("LAOBAN_ORG_SYNC_SEC", 3600)),
+                sync_create=os.environ.get("LAOBAN_ORG_SYNC_CREATE", "0").strip() == "1")
+            self._org_sweeper.start()
 
     def serve_forever(self):
         self._serving = True
@@ -1498,6 +1579,8 @@ class DashboardServer:
         （BaseServer.shutdown 对未 serve 的实例会永久阻塞）。"""
         if self._sweeper is not None:
             self._sweeper.stop()
+        if self._org_sweeper is not None:
+            self._org_sweeper.stop()
         if self._serving:
             self.httpd.shutdown()
         else:

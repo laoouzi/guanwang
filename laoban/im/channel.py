@@ -37,3 +37,35 @@ class IMChannel:
 
     def fetch_users(self, dept_id=None) -> list[dict]:
         return []
+
+
+class SenderChannel(IMChannel):
+    """适配仅有 send_text 的旧式客户端（测试 fake / 早期独立 client）。
+
+    让「只懂出站」的对象也能注册进 ChannelHub；入站能力缺失时返回 501。
+    """
+
+    def __init__(self, platform: str, client):
+        self.platform = platform
+        self._client = client
+
+    def send_text(self, im_user: str, text: str) -> bool:
+        try:
+            self._client.send_text(im_user, text)
+            return True
+        except Exception as e:
+            print(f"[IM:{self.platform}] 推送失败（{im_user}）：{e!r}")
+            return False
+
+    def send_text_chat(self, chat_id: str, text: str) -> bool:
+        fn = getattr(self._client, "send_text_chat", None)
+        if fn is None:
+            return False
+        try:
+            fn(chat_id, text)
+            return True
+        except Exception:
+            return False
+
+    def handle(self, body, background: bool = True) -> tuple[int, dict]:
+        return 501, {"error": "该客户端无入站处理能力"}

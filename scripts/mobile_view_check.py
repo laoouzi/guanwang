@@ -262,7 +262,7 @@ def _check() -> int:
         assert_("催办徽标渲染（催2）",
                 page.locator("#tasks .wait-badge").filter(has_text="催2").count() == 1)
 
-        # ---- #25 时间线节点操作跳转 ----
+        # ---- #29 时间线节点内联回复（不跳区）----
         # 催办节点出「回 emp-chen」「回 dev」「回 pm」签；流转节点出「找 ·」签
         acts = page.locator("#tasks .tl-act")
         acts_text = acts.all_inner_texts()
@@ -274,16 +274,16 @@ def _check() -> int:
         assert_("承接人工位跳转签",
                 page.locator("#tasks .tl-meta .tl-act").count() == 1)
         page.screenshot(path="/workspace/scripts/mobile_view_tl_acts.png")
-        # 点「回 emp-chen」→ 对话区收件人预填 + 视口滚到对话区
+        # 点「回 emp-chen」→ 就地展开内联回复框（不再跳到对话区）
         page.locator("#tasks .tl-act", has_text="回 emp-chen").first.click()
-        page.wait_for_timeout(700)   # smooth 滚动
-        assert_("点击回信签：chatTo 预填 emp-chen",
-                page.input_value("#chatTo") == "emp-chen")
-        chat_box = page.evaluate(
-            "() => { const r = document.getElementById('chatSection')"
-            ".getBoundingClientRect(); return r.top; }")
-        assert_(f"点击回信签：视口滚到对话区（top={chat_box:.0f}）",
-                -100 < chat_box < 500)
+        page.wait_for_timeout(300)
+        assert_("点击回信签：就地展开内联回复框（不跳区）",
+                page.locator("#tasks .tl-reply textarea").count() >= 1)
+        ph = page.locator("#tasks .tl-reply textarea").first.get_attribute("placeholder")
+        assert_(f"内联回复框 placeholder 含收件人（{ph}）",
+                "emp-chen" in (ph or ""))
+        assert_("点击回信签：不预填对话区收件人（不跳区）",
+                page.input_value("#chatTo") == "")
         # 点 meta 的「工位」→ 队列区预填承接人并加载（T-1002 仍展开）
         page.locator("#tasks .tl-meta .tl-act", has_text="工位").click()
         page.wait_for_timeout(700)
