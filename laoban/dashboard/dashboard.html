@@ -78,6 +78,10 @@
     }
     .masthead .sub { color: var(--ink-2); font-size: 13px; letter-spacing: 1px; padding-bottom: 6px; }
     .masthead .ledger-no { margin-left: auto; text-align: right; color: var(--ink-3); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; padding-bottom: 4px; }
+    .masthead #autoBar { margin: 0; padding-bottom: 4px; font-size: 11.5px; font-family: var(--mono); color: var(--ink-3); line-height: 1.5; text-align: right; }
+    .masthead #autoBar label { cursor: pointer; user-select: none; white-space: nowrap; }
+    .masthead #autoBar input { vertical-align: -1px; accent-color: var(--vermilion); }
+    .masthead #autoBar #autoMeta { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
     /* ---- 账页卡（section）---- */
     section.sheet {
@@ -239,6 +243,12 @@
       <h1>经营台账</h1>
       <div class="sub">像经营公司一样管理人类与 AI 员工 · 派单 / 执行 / 验收 / 记分 / 晋升</div>
       <div class="ledger-no" id="ledgerClock"></div>
+      <p id="autoBar" class="msg-meta">
+        <label title="每 30 秒自动重拉台账/负荷/绩效，标签页不可见时暂停">
+          <input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)" /> 自动刷新
+        </label>
+        <span id="autoMeta">未刷新</span>
+      </p>
     </div>
 
     <p id="loginBar">
@@ -668,6 +678,17 @@
     }
 
     async function load() {
+      // in-flight 守卫：自动刷新的轮询不与正在跑的刷新叠加（省重复请求）；
+      // 操作后的手动 load 不查此标志（必刷，保操作反馈及时）。
+      window._loading = true;
+      try {
+        await _loadAll();
+      } finally {
+        window._loading = false;
+      }
+    }
+
+    async function _loadAll() {
       // 未登录时接口返回 401 JSON 对象（非数组），需防御避免 .map 崩溃
       const ts = await (await fetch('/api/tasks')).json().catch(() => []);
       window._tasks = Array.isArray(ts) ? ts : [];
@@ -1345,7 +1366,48 @@
     tickClock();
     setInterval(tickClock, 30000);
 
-    load();
+    // ---- 看板自动刷新（免 F5）：30s 轮询 + 标签页不可见暂停 ----
+    const AUTO_MS = 30000;
+
+    // 开关偏好跨会话保留（localStorage；旧浏览器/隐私模式静默降级为默认开）
+    window._autoOn = true;
+    try {
+      window._autoOn = localStorage.getItem('laobanAutoRefresh') !== '0';
+    } catch (e) { /* 无 localStorage 则用默认 */ }
+    document.getElementById('autoToggle').checked = window._autoOn;
+
+    function markRefreshed() {
+      const el = document.getElementById('autoMeta');
+      if (!el) return;
+      const t = new Date().toTimeString().slice(0, 8);
+      el.textContent = window._autoOn ? `更新 ${t}` : `已暂停（最后 ${t}）`;
+    }
+
+    function toggleAuto(on) {
+      window._autoOn = on;
+      try {
+        localStorage.setItem('laobanAutoRefresh', on ? '1' : '0');
+      } catch (e) { /* 存不进就算了，本次会话仍生效 */ }
+      markRefreshed();
+      // 开启即刻补刷一次（关闭则只更新状态条，数据停留现状）
+      if (on) autoRefresh(true);
+    }
+
+    async function autoRefresh(force) {
+      if (!window._autoOn && !force) return;   // 关了就不拉
+      if (document.hidden) return;             // 标签页不可见：省请求
+      if (window._loading) return;             // 上一轮还没跑完：跳过本轮
+      await load();                            // 全量重拉（各接口只读幂等）
+      markRefreshed();
+    }
+
+    setInterval(() => autoRefresh(), AUTO_MS);
+    // 回到页面立刻补刷（离开期间轮询被 hidden 跳过，数据可能已旧）
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && window._autoOn) autoRefresh();
+    });
+
+    load().then(markRefreshed);   // 首次加载完成即记录基线时间
   </script>
 </body>
 </html>
