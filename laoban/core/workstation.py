@@ -50,6 +50,7 @@ def assign_task(store: JsonStore, task_id: str, emp_id: str,
     if not task:
         raise KeyError(f"任务不存在：{task_id}")
     advance(task, ASSIGNED, actor=actor, remark=f"派发给 {emp_id}（{emp.name}）")
+    task.assignee = emp_id   # 持久承接人：出队后个人计划视图仍可追溯
     store.save_task(task)
     enqueue(store, emp_id, task_id)
     return task

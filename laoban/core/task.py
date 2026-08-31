@@ -18,6 +18,14 @@ BLOCKED = "blocked"
 
 TERMINAL_STATES = frozenset({DONE, CANCELLED, BLOCKED})
 
+# 计划周期（个人计划视图分组用）
+HORIZONS = ("day", "week", "month", "quarter", "half_year", "year")
+HORIZON_LABELS = {
+    "day": "日计划", "week": "周计划", "month": "月计划",
+    "quarter": "季度计划", "half_year": "半年计划", "year": "年度计划",
+    "": "未分类",
+}
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -33,6 +41,9 @@ class Task:
     review_round: int = 0
     block_reason: str = ""
     due_at: str = ""           # 截止时间（ISO，空 = 不限期；验收时判按时/超时）
+    plan_horizon: str = ""     # 计划周期：day/week/month/quarter/half_year/year（空 = 未分类）
+    created_by: str = ""       # 提交人（区分被动分配 vs 个人计划）
+    assignee: str = ""         # 承接人（派单写入，持久保留——出队后仍可追溯）
     created_at: str = field(default_factory=utcnow)
     updated_at: str = field(default_factory=utcnow)
     flow_log: list[dict[str, Any]] = field(default_factory=list)
@@ -48,6 +59,9 @@ class Task:
             "review_round": self.review_round,
             "block_reason": self.block_reason,
             "due_at": self.due_at,
+            "plan_horizon": self.plan_horizon,
+            "created_by": self.created_by,
+            "assignee": self.assignee,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "flow_log": self.flow_log,
@@ -65,6 +79,9 @@ class Task:
             review_round=d.get("review_round", 0),
             block_reason=d.get("block_reason", ""),
             due_at=d.get("due_at", ""),
+            plan_horizon=d.get("plan_horizon", ""),
+            created_by=d.get("created_by", ""),
+            assignee=d.get("assignee", ""),
             created_at=d.get("created_at", utcnow()),
             updated_at=d.get("updated_at", utcnow()),
             flow_log=d.get("flow_log", []),

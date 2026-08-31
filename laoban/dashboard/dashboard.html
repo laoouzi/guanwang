@@ -49,9 +49,18 @@
   <h2>任务驾驶舱</h2>
   <p id="opMsg" class="msg-meta"></p>
   <p>
-    <input id="newTaskTitle" placeholder="新任务标题" style="width:26%" />
-    <input id="newTaskInstr" placeholder="任务说明（可选）" style="width:32%" />
-    <input id="newTaskDue" placeholder="截止（可选，2026-12-31 或 2026-12-31T18:00）" style="width:24%" />
+    <input id="newTaskTitle" placeholder="新任务标题" style="width:22%" />
+    <input id="newTaskInstr" placeholder="任务说明（可选）" style="width:28%" />
+    <input id="newTaskDue" placeholder="截止（可选，2026-12-31 或 2026-12-31T18:00）" style="width:22%" />
+    <select id="newTaskHorizon" style="width:8%">
+      <option value="">周期</option>
+      <option value="day">日</option>
+      <option value="week">周</option>
+      <option value="month">月</option>
+      <option value="quarter">季</option>
+      <option value="half_year">半年</option>
+      <option value="year">年</option>
+    </select>
     <button onclick="submitTask()">提交任务</button>
   </p>
   <p id="assignRow">
@@ -123,7 +132,16 @@
   <div id="org"></div>
 
   <h2>任务</h2>
-  <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>截止</th></tr></thead><tbody></tbody></table>
+  <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th></tr></thead><tbody></tbody></table>
+
+  <h2 id="plansSection">我的任务计划（日 / 周 / 月 / 季 / 半年 / 年）</h2>
+  <p id="plansScope" style="margin:4px 0 8px;font-weight:600"></p>
+  <p style="margin:4px 0">
+    <input id="plansWho" list="rosterIds" placeholder="查谁的计划（员工 id，空 = 按权限汇总）" style="width:28%" />
+    <button onclick="loadPlans()">查看</button>
+    <span class="msg-meta" style="margin-left:8px">含被动分配与个人计划，按周期分组，显示完成情况</span>
+  </p>
+  <div id="plansBoard"></div>
 
   <h2>员工花名册</h2>
   <table id="employees"><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>部门</th><th>状态</th></tr></thead><tbody></tbody></table>
@@ -178,11 +196,14 @@
       return `<span class="status ${esc(status)}">${esc(STATUS_LABEL[status] || status)}</span>`;
     }
 
+    const HORIZON_LABELS = {day:'日', week:'周', month:'月', quarter:'季', half_year:'半年', year:'年', '':'—'};
+
     async function load() {
       const ts = await (await fetch('/api/tasks')).json();
       document.querySelector('#tasks tbody').innerHTML = ts.map(t =>
         `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td><td>${esc(t.state)}</td>` +
-        `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}</td></tr>`).join('');
+        `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}</td>` +
+        `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td></tr>`).join('');
       const es = await (await fetch('/api/employees')).json();
       document.querySelector('#employees tbody').innerHTML = es.map(e =>
         `<tr><td>${esc(e.id)}</td><td>${kindBadge(e.kind)}</td>` +
@@ -201,6 +222,7 @@
       await loadHeadcount();
       await loadPerf();
       await loadPoints();
+      await loadPlans();
       await loadReport();
     }
 
@@ -268,15 +290,16 @@
       el.textContent = ok ? (data.message || '操作成功')
                           : `⚠️ ${data.error || ('HTTP ' + status)}`;
       el.style.color = ok ? '#2a7a2a' : '#b33';
-      if (ok) { load(); loadApprovals(); loadPerf(); loadPoints(); }
+      if (ok) { load(); loadApprovals(); loadPerf(); loadPoints(); loadPlans(); }
     }
 
     async function submitTask() {
       const title = document.getElementById('newTaskTitle').value.trim();
       const instruction = document.getElementById('newTaskInstr').value.trim();
       const due_at = document.getElementById('newTaskDue').value.trim();
+      const plan_horizon = document.getElementById('newTaskHorizon').value;
       if (!title) { alert('请输入任务标题'); return; }
-      const { ok, data, status } = await opPost('/api/task/submit', { title, instruction, due_at });
+      const { ok, data, status } = await opPost('/api/task/submit', { title, instruction, due_at, plan_horizon });
       if (ok) {
         document.getElementById('newTaskTitle').value = '';
         document.getElementById('newTaskInstr').value = '';
@@ -284,6 +307,7 @@
         document.getElementById('assignId').value = data.id;   // 顺手填入派单框
       }
       opFeedback(ok, data, status);
+      if (ok) loadPlans();
     }
 
     async function assignTask() {
@@ -459,6 +483,42 @@
         `规则：${board.rules.note}（满分验收 +${board.rules.points_per_task}，` +
         `驳回 -${board.rules.penalty_rejection}，按时 +${board.rules.bonus_on_time}，` +
         `超时 -${board.rules.penalty_late}）`;
+    }
+
+    const SOURCE_LABELS = {assigned: '被动分配', self: '个人计划', unassigned: '未指派'};
+    const SOURCE_BADGE = {assigned: '·被动', self: '·计划', unassigned: '·未派'};
+
+    async function loadPlans() {
+      const who = document.getElementById('plansWho').value.trim();
+      const url = '/api/plans' + (who ? `?who=${encodeURIComponent(who)}` : '');
+      const resp = await fetch(url);
+      if (!resp.ok) return;
+      const plans = await resp.json();
+      const pct = v => (v * 100).toFixed(0) + '%';
+      const o = plans.overall;
+      document.getElementById('plansScope').textContent =
+        `📋 计划汇总（${plans.scope}）：共 ${o.total} 项 · 完成 ${o.done}（完成率 ${o.total ? pct(o.completion_rate) : '—'}）` +
+        ` · 按时 ${o.on_time} · 超时 ${o.late}`;
+      const board = document.getElementById('plansBoard');
+      if (!plans.horizons.length) {
+        board.innerHTML = '<p class="empty">暂无计划任务（提交时选择周期，或等待派单）</p>';
+        return;
+      }
+      board.innerHTML = plans.horizons.map(h => {
+        const rows = h.tasks.map(t =>
+          `<tr><td>${esc(t.id)}</td>` +
+          `<td>${esc(t.title)} <span class="msg-meta">${SOURCE_BADGE[t.source] || ''}${t.assignee ? '·' + esc(t.assignee) : ''}</span></td>` +
+          `<td>${statusBadge(t.state)}</td>` +
+          `<td>${SOURCE_LABELS[t.source] || t.source}</td>` +
+          `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}</td>` +
+          `<td>${t.state === 'done' ? (t.on_time === null || t.on_time === undefined ? '—' : (t.on_time ? '按时' : '超时')) : '—'}</td></tr>`).join('');
+        return `<div style="margin:0 0 14px">
+          <p style="margin:2px 0"><b>${esc(h.label)}</b>
+            <span class="msg-meta">共 ${h.total} 项 · 完成 ${h.done}（${pct(h.completion_rate)}）· 按时 ${h.on_time} · 超时 ${h.late}</span></p>
+          <table><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>来源</th><th>截止</th><th>时效</th></tr></thead>
+          <tbody>${rows}</tbody></table>
+        </div>`;
+      }).join('');
     }
 
     async function loadReport() {

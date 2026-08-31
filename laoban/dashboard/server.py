@@ -12,7 +12,7 @@ from ..core.employee import Employee
 from ..core.human_inbox import HumanInbox
 from ..core.messenger import inbox as msg_inbox, sent as msg_sent
 from ..core.workstation import (queue_of, assign_task_auto, dequeue)
-from ..core.task import Task, DOING, REPORTING, DONE
+from ..core.task import Task, DOING, REPORTING, DONE, HORIZONS, HORIZON_LABELS
 from ..core.state_machine import advance, IllegalTransition
 from ..core.retro import review_and_learn
 from ..core.ledger import FileLedger
@@ -20,6 +20,91 @@ from ..runner.approval_log import ApprovalLog
 from . import rbac
 
 SESSION_COOKIE = "laoban_session"
+
+
+def _task_source(task: Task) -> str:
+    """任务来源：assigned=被动分配（别人派给我）/ self=个人计划（自己提的）/
+    unassigned=未指派。"""
+    if not task.assignee:
+        return "unassigned"
+    if task.created_by and task.created_by == task.assignee:
+        return "self"
+    return "assigned"
+
+
+def _plans_view(store, who: str, role: str, me) -> dict:
+    """个人任务计划视图：按周期分组 + 来源 + 完成情况。
+
+    who 为空：admin=全公司；manager=本部门成员（含自己）。
+    返回：{"who": …, "horizons": [{"key","label","total","done","on_time",
+    "late","tasks":[{id,title,state,source,due_at,on_time}]}], "overall": …}
+    """
+    from ..core.task import DONE
+    from ..core.points import on_time_points
+
+    # 圈定可见人集合（任务按 assignee / created_by 归属）
+    if who:
+        scope_ids = {who}
+    elif role == rbac.MANAGER and me is not None:
+        scope_ids = set(rbac.dept_members(store, me)) | {me.id}
+    else:
+        scope_ids = None   # 全公司
+
+    tasks = store.list_tasks()
+    if scope_ids is not None:
+        tasks = [t for t in tasks
+                 if t.assignee in scope_ids or t.created_by in scope_ids]
+
+    groups: dict[str, list] = {h: [] for h in HORIZONS}
+    groups[""] = []
+    for t in tasks:
+        groups.setdefault(t.plan_horizon if t.plan_horizon in HORIZONS else "", []).append(t)
+
+    horizons_out = []
+    total_all = done_all = on_time_all = late_all = 0
+    for key in ("day", "week", "month", "quarter", "half_year", "year", ""):
+        bucket = groups.get(key, [])
+        if not bucket:
+            continue   # 空周期不渲染
+        done = sum(1 for t in bucket if t.state == DONE)
+        on_time = sum(1 for t in bucket
+                      if t.state == DONE and on_time_points(t.due_at, t.updated_at) is not None
+                      and on_time_points(t.due_at, t.updated_at) > 0)
+        late = sum(1 for t in bucket
+                   if t.state == DONE and on_time_points(t.due_at, t.updated_at) is not None
+                   and on_time_points(t.due_at, t.updated_at) < 0)
+        total_all += len(bucket)
+        done_all += done
+        on_time_all += on_time
+        late_all += late
+        horizons_out.append({
+            "key": key, "label": HORIZON_LABELS[key],
+            "total": len(bucket), "done": done,
+            "on_time": on_time, "late": late,
+            "completion_rate": round(done / len(bucket), 4) if bucket else 0.0,
+            "tasks": [{
+                "id": t.id, "title": t.title, "state": t.state,
+                "source": _task_source(t),
+                "assignee": t.assignee, "created_by": t.created_by,
+                "due_at": t.due_at,
+                "on_time": (on_time_points(t.due_at, t.updated_at) > 0
+                            if t.state == DONE
+                            and on_time_points(t.due_at, t.updated_at) is not None
+                            else None),
+            } for t in bucket],
+        })
+    return {
+        "who": who,
+        "scope": "全公司" if scope_ids is None
+                 else (f"本部门+我（{len(scope_ids)}人）" if role == rbac.MANAGER else who),
+        "horizons": horizons_out,
+        "overall": {
+            "total": total_all, "done": done_all,
+            "on_time": on_time_all, "late": late_all,
+            "completion_rate": (round(done_all / total_all, 4)
+                                if total_all else 0.0),
+        },
+    }
 
 
 def _parse_due(s: str) -> str:
@@ -252,12 +337,17 @@ class _Handler(BaseHTTPRequestHandler):
         due_at = _parse_due(str(body.get("due_at", "")).strip())
         if body.get("due_at") and not due_at:
             return self._error(400, "due_at 格式无效（ISO 时间，如 2026-12-31T18:00:00）")
+        horizon = str(body.get("plan_horizon", "")).strip()
+        if horizon and horizon not in HORIZONS:
+            return self._error(400, f"plan_horizon 无效（可选：{'/'.join(HORIZONS)}）")
         task = Task(id=f"T-{uuid.uuid4().hex[:6]}", title=title,
                     instruction=str(body.get("instruction", "")).strip(),
-                    due_at=due_at)
+                    due_at=due_at, plan_horizon=horizon,
+                    created_by=self._actor(me))
         self.store.save_task(task)
         return self._json({"id": task.id, "title": task.title,
                            "state": task.state, "due_at": task.due_at,
+                           "plan_horizon": task.plan_horizon,
                            "message": f"任务已提交：{task.id}"})
 
     def _op_assign(self, role: str, me, body: dict):
@@ -291,12 +381,13 @@ class _Handler(BaseHTTPRequestHandler):
         if not task:
             return self._error(404, f"任务不存在：{task_id}")
 
-        # 找承接人（工位队列里有这个任务的人）
-        assignee = ""
-        for e in self.store.list_employees():
-            if task_id in e.workspace.get("queue", []):
-                assignee = e.id
-                break
+        # 找承接人：优先持久的 assignee 字段；旧数据兜底扫工位队列
+        assignee = task.assignee
+        if not assignee:
+            for e in self.store.list_employees():
+                if task_id in e.workspace.get("queue", []):
+                    assignee = e.id
+                    break
         if role == rbac.MANAGER and assignee and \
                 assignee not in rbac.dept_members(self.store, me):
             return self._error(403, "只能验收本部门成员的任务")
@@ -564,6 +655,18 @@ class _Handler(BaseHTTPRequestHandler):
                 if tid in tasks else {"id": tid, "title": "（任务档案缺失）", "state": ""}
                 for tid in task_ids
             ])
+        if u.path == "/api/plans":
+            # 个人任务计划：按周期（日/周/月/季/半年/年）分组，含被动分配/个人计划
+            # 与完成情况。可见范围：admin 任何人（缺省全公司汇总）；manager 本部门；
+            # staff 仅本人。
+            q = parse_qs(u.query)
+            who = q.get("who", [""])[0]
+            if role == rbac.STAFF:
+                who = me.id if me is not None else who
+            elif who and not rbac._can_view_dept_scoped(self.store, me, role, who):
+                return self._error(403, "只能查看本人（或你管理部门成员）的计划")
+            plans = _plans_view(self.store, who=who, role=role, me=me)
+            return self._json(plans)
         if u.path == "/api/approvals":
             # 审批单：admin 全部；manager/staff 仅自己发起的
             status = parse_qs(u.query).get("status", [""])[0]
