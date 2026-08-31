@@ -22,6 +22,27 @@ from . import rbac
 SESSION_COOKIE = "laoban_session"
 
 
+def _parse_due(s: str) -> str:
+    """截止时间解析：ISO 时间（2026-12-31T18:00）或日期（2026-12-31 → 当天 23:59:59）。
+
+    返回归一化的 ISO 字符串（含时区）；无效/空返回 ""（= 不限期）。
+    """
+    s = (s or "").strip()
+    if not s:
+        return ""
+    from datetime import datetime, timedelta, timezone
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    # 仅日期（时分秒全 0）→ 截止到当天结束
+    if dt.hour == dt.minute == dt.second == 0:
+        dt += timedelta(hours=23, minutes=59, seconds=59)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
 class _Handler(BaseHTTPRequestHandler):
     store: JsonStore = None  # 由工厂注入
     gateway = None           # 可选：聊天端点需要 LLM 网关
@@ -228,11 +249,15 @@ class _Handler(BaseHTTPRequestHandler):
         title = str(body.get("title", "")).strip()
         if not title:
             return self._error(400, "缺少 title")
+        due_at = _parse_due(str(body.get("due_at", "")).strip())
+        if body.get("due_at") and not due_at:
+            return self._error(400, "due_at 格式无效（ISO 时间，如 2026-12-31T18:00:00）")
         task = Task(id=f"T-{uuid.uuid4().hex[:6]}", title=title,
-                    instruction=str(body.get("instruction", "")).strip())
+                    instruction=str(body.get("instruction", "")).strip(),
+                    due_at=due_at)
         self.store.save_task(task)
         return self._json({"id": task.id, "title": task.title,
-                           "state": task.state,
+                           "state": task.state, "due_at": task.due_at,
                            "message": f"任务已提交：{task.id}"})
 
     def _op_assign(self, role: str, me, body: dict):
@@ -279,6 +304,7 @@ class _Handler(BaseHTTPRequestHandler):
         if task.state not in (DOING, REPORTING):
             return self._error(409, f"当前状态 {task.state} 不可验收（需 doing/reporting）")
         actor = self._actor(me)
+        on_time = None   # 时效判定结果（None=无限期；无承接人时保持 None）
         if task.state == DOING:
             advance(task, REPORTING, actor=actor, remark="验收前汇报（看板）")
         advance(task, DONE, actor=actor,
@@ -297,14 +323,18 @@ class _Handler(BaseHTTPRequestHandler):
                                           gateway=self.gateway)
                 self.store.save_employee(emp)
             # 记账：完成（含交付落档的成本/耗时）+ 奖励积分
-            from ..core.points import (points_for_acceptance, PENALTY_REJECTION,
-                                       LOW_SCORE)
+            from ..core.points import (points_for_acceptance, on_time_points,
+                                       PENALTY_REJECTION, LOW_SCORE)
             delivery = next((p for p in reversed(task.progress_log)
                              if p.get("deliverable")), {})
             cost = float(delivery.get("cost", 0.0) or 0.0)
             elapsed = float(delivery.get("elapsed", 0.0) or 0.0)
+            # 时效判定：完成时间（状态机落 updated_at）vs 截止时间
+            timing_pts = on_time_points(task.due_at, task.updated_at)
+            on_time = None if timing_pts is None else timing_pts > 0
             self.ledger.record_completion(assignee, task_id=task_id,
-                                           cost=cost, elapsed=elapsed)
+                                           cost=cost, elapsed=elapsed,
+                                           score=score, on_time=on_time)
             pts = points_for_acceptance(score)
             reason = f"验收通过（{score}/5）：{task.title}"
             if score <= LOW_SCORE:
@@ -312,6 +342,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self.ledger.record_rejection(assignee)
                 pts = -PENALTY_REJECTION
                 reason = f"验收驳回（{score}/5）：{task.title}"
+            elif timing_pts is not None:
+                # 时效奖惩并入本次积分（通过才奖；驳回已经扣足）
+                pts += timing_pts
+                tag = "按时" if timing_pts > 0 else "超时"
+                reason += f"（{tag}）"
             self.ledger.record_points(assignee, pts, reason=reason)
             self.ledger.record_step(assignee)
             # 晋升通道（积分入账后判定，本次验收即时生效）：
@@ -322,9 +357,11 @@ class _Handler(BaseHTTPRequestHandler):
                     self.store, emp,
                     role=rbac.role_of(self.store, emp),
                     ledger=self.ledger)
+        timing_note = "" if on_time is None else ("（按时完成）" if on_time
+                                                  else "（超时完成）")
         return self._json({"id": task.id, "state": task.state,
                            "assignee": assignee,
-                           "message": f"任务已完成（评分 {score}/5）",
+                           "message": f"任务已完成（评分 {score}/5）{timing_note}",
                            "review": review,
                            "promotion": promotion,
                            "points": self.ledger.points(assignee) if assignee else None})

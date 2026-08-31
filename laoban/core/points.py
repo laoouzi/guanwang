@@ -3,6 +3,8 @@
 记分规则（集中在此，加规则只改一处）：
 - 验收通过：+POINTS_PER_TASK × (score/5)（满分验收 +10，3 分 +6）；
 - 验收驳回（低分被打回）：-PENALTY_REJECTION；
+- 时效奖惩：有截止的任务，按时 +BONUS_ON_TIME、超时 -PENALTY_LATE
+  （无限期任务不奖不罚，避免虚设截止刷分）；
 - ROI = 积分 / 累计成本（元）：统一公平对比（AI 成本低是真实优势）。
 
 榜单设计（避免不公平对比）：
@@ -17,11 +19,35 @@ from .store import JsonStore
 POINTS_PER_TASK = 10.0     # 满分验收的基础分
 PENALTY_REJECTION = 5.0    # 驳回扣分
 LOW_SCORE = 2              # score <= 2 视为驳回（与复盘阈值一致）
+BONUS_ON_TIME = 2.0        # 按时完成奖励（有截止的任务）
+PENALTY_LATE = 2.0         # 超时完成扣分（有截止的任务）
 
 
 def points_for_acceptance(score: int) -> float:
     """验收通过积分：满分 10，按评分线性折算（0.5 步进）。"""
     return round(POINTS_PER_TASK * max(0, min(5, score)) / 5 * 2) / 2
+
+
+def on_time_points(due_at: str, completed_at: str) -> float | None:
+    """时效积分：有截止的任务按时 +2、超时 -2；无限期返回 None（不奖不罚）。
+
+    日期字符串不可解析时按无限期处理（宁可漏奖不可误罚）。
+    """
+    from datetime import datetime, timezone
+
+    def _parse(s: str):
+        if not s:
+            return None
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    due, done = _parse(due_at), _parse(completed_at)
+    if due is None or done is None:
+        return None
+    return BONUS_ON_TIME if done <= due else -PENALTY_LATE
 
 
 def accept_cost(emp: Employee, elapsed_sec: float = 0.0,
@@ -62,6 +88,8 @@ def leaderboard(store: JsonStore, ledger) -> dict:
             "points": pts,
             "completion_count": st.get("completion_count", 0),
             "rejection_count": st.get("rejection_count", 0),
+            "avg_score": st.get("avg_score", 0.0),
+            "on_time_rate": st.get("on_time_rate", None),
             "total_cost": round(cost, 4),
         }
         (ai_rows if e.kind == "ai" else human_rows).append(row)
@@ -77,7 +105,9 @@ def leaderboard(store: JsonStore, ledger) -> dict:
         "rules": {
             "points_per_task": POINTS_PER_TASK,
             "penalty_rejection": PENALTY_REJECTION,
-            "note": "验收通过 +10×(评分/5)；驳回 -5；"
+            "bonus_on_time": BONUS_ON_TIME,
+            "penalty_late": PENALTY_LATE,
+            "note": "验收通过 +10×(评分/5)；驳回 -5；有截止任务按时 +2、超时 -2；"
                     "ROI = 积分/累计成本（AI 按 token 单价、人类按时薪折算）",
         },
     }

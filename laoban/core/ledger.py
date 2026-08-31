@@ -10,7 +10,8 @@ from .store import JsonStore
 
 
 class Ledger:
-    """绩效账本：完成数 / 平均耗时 / 总成本 / 驳回率 / 人类介入率 / 奖励积分。"""
+    """绩效账本：完成数 / 平均耗时 / 总成本 / 驳回率 / 人类介入率 / 奖励积分
+    / 平均验收评分 / 按时完成率。"""
 
     def __init__(self):
         self._completions: dict[str, list[dict[str, float]]] = defaultdict(list)
@@ -19,8 +20,14 @@ class Ledger:
         self._interventions: dict[str, int] = defaultdict(int)
         self._points: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-    def record_completion(self, emp_id: str, task_id: str = "", cost: float = 0.0, elapsed: float = 0.0) -> None:
-        self._completions[emp_id].append({"cost": cost, "elapsed": elapsed})
+    def record_completion(self, emp_id: str, task_id: str = "", cost: float = 0.0,
+                          elapsed: float = 0.0, score: float = 0.0,
+                          on_time: bool | None = None) -> None:
+        """完成记账：score=验收评分（0 表示未记）；on_time=None 表示无限期任务。"""
+        self._completions[emp_id].append({
+            "cost": cost, "elapsed": elapsed,
+            "score": score, "on_time": on_time,
+        })
 
     def record_rejection(self, emp_id: str) -> None:
         self._rejections[emp_id] += 1
@@ -52,6 +59,13 @@ class Ledger:
         steps = self._steps.get(emp_id, 0)
         interventions = self._interventions.get(emp_id, 0)
         intervention_rate = (interventions / steps) if steps else 0.0
+        # 质量维度：平均验收评分（只统计有评分记录的）
+        scored = [c["score"] for c in comps if c.get("score")]
+        avg_score = (sum(scored) / len(scored)) if scored else 0.0
+        # 时效维度：按时完成率（分母 = 有截止的任务数；无限期不计入）
+        with_due = [c for c in comps if c.get("on_time") is not None]
+        on_time_count = sum(1 for c in with_due if c["on_time"])
+        on_time_rate = (on_time_count / len(with_due)) if with_due else None
         return {
             "completion_count": len(comps),
             "total_cost": total_cost,
@@ -60,6 +74,11 @@ class Ledger:
             "rejection_count": rejections,
             "human_intervention_rate": intervention_rate,
             "points": self.points(emp_id),
+            "avg_score": round(avg_score, 2),
+            "on_time_count": on_time_count,
+            "due_count": len(with_due),
+            "on_time_rate": (round(on_time_rate, 4)
+                             if on_time_rate is not None else None),
         }
 
 
@@ -102,8 +121,11 @@ class FileLedger(Ledger):
             json.dump(d, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self.path)
 
-    def record_completion(self, emp_id: str, task_id: str = "", cost: float = 0.0, elapsed: float = 0.0) -> None:
-        super().record_completion(emp_id, task_id, cost, elapsed)
+    def record_completion(self, emp_id: str, task_id: str = "", cost: float = 0.0,
+                          elapsed: float = 0.0, score: float = 0.0,
+                          on_time: bool | None = None) -> None:
+        super().record_completion(emp_id, task_id, cost, elapsed,
+                                  score=score, on_time=on_time)
         self._save()
 
     def record_rejection(self, emp_id: str) -> None:
