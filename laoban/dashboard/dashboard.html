@@ -398,12 +398,16 @@
       if (!resp.ok) return;
       const rows = await resp.json();
       const AUTONOMY = { supervised: '全审批', semi: '半自主', full: '高自主' };
+      const ROLES = { staff: '员工', manager: '负责人', admin: '管理员' };
       document.querySelector('#report tbody').innerHTML = rows.length
         ? rows.map(d => {
-          const members = d.members.map(m =>
-            `${esc(m.name)}（${m.kind === 'human' ? '人' : 'AI'}·${esc(AUTONOMY[m.autonomy_level] || m.autonomy_level)}）：完成${m.completion_count} · 教训${m.lessons}` +
-            (m.latest_lesson ? ` · 最新：${esc(m.latest_lesson.slice(0, 40))}` : '')
-          ).join('<br>');
+          const members = d.members.map(m => {
+            const tag = m.kind === 'human'
+              ? `人·${esc(ROLES[m.role] || m.role)}`
+              : `AI·${esc(AUTONOMY[m.autonomy_level] || m.autonomy_level)}`;
+            return `${esc(m.name)}（${tag}）：完成${m.completion_count} · 教训${m.lessons}` +
+              (m.latest_lesson ? ` · 最新：${esc(m.latest_lesson.slice(0, 40))}` : '');
+          }).join('<br>');
           return `<tr><td>${esc(d.department)}</td><td>${d.completion_count}</td>` +
                  `<td>${d.rejections}</td><td>${d.lessons}</td><td>${d.auto_reviews}</td>` +
                  `<td style="max-width:40%">${members || '-'}</td></tr>`;

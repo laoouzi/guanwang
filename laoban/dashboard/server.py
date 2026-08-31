@@ -295,9 +295,11 @@ class _Handler(BaseHTTPRequestHandler):
                 review = review_and_learn(self.store, emp, task,
                                           score=score, comment=comment,
                                           gateway=self.gateway)
-                # 晋升通道：连续验收通过 → 自动申请升自主等级（老板审批）
+                # 晋升通道：AI 升自主等级 / 人类升管理权限（老板审批）
                 from ..core.promotion import maybe_request_promotion
-                promotion = maybe_request_promotion(self.store, emp)
+                promotion = maybe_request_promotion(
+                    self.store, emp,
+                    role=rbac.role_of(self.store, emp))
                 self.store.save_employee(emp)
             self.ledger.record_completion(assignee, task_id=task_id)
             self.ledger.record_step(assignee)
@@ -324,14 +326,15 @@ class _Handler(BaseHTTPRequestHandler):
             return self._error(404, f"待审批单不存在或已处理：{log_id}")
         log.log_decision(log_id, approver=self._actor(me),
                          approved=approved, opinion=opinion)
-        # 晋升申请通过 → 立即生效（写回 autonomy_level）
+        # 晋升申请通过 → 立即生效（AI 升自主等级 / 人类升管理权限）
         message = "已通过" if approved else "已驳回"
         if approved and entry.request.get("type") == "晋升申请":
             from ..core.promotion import apply_promotion
             result = apply_promotion(self.store, entry.request)
             if result:
-                message = (f"已通过：{result['emp_id']} 自主等级升至 "
-                           f"{result['autonomy_level']}（低风险操作免审批）")
+                suffix = ("（低风险操作免审批）"
+                          if "autonomy_level" in result else "")
+                message = f"已通过：{result['message']}{suffix}"
         requester = entry.request.get("requester", "")
         if requester:
             self.ledger.record_human_intervention(requester, "approval")
@@ -414,6 +417,7 @@ class _Handler(BaseHTTPRequestHandler):
             d["rejections"] += st.get("rejection_count", 0)
             d["members"].append({
                 "id": e.id, "name": e.name, "kind": e.kind,
+                "role": rbac.role_of(self.store, e),
                 "completion_count": st.get("completion_count", 0),
                 "lessons": len(lessons), "wins": len(wins),
                 "autonomy_level": e.permissions.get("autonomy_level", "supervised"),
