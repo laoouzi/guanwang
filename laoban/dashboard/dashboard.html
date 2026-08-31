@@ -69,6 +69,15 @@
       padding: 3px 10px; border-radius: 3px; letter-spacing: 1px;
     }
     nav.anchors a:hover { color: #fff; background: rgba(255,255,255,.12); }
+    /* 未读红点：导航「对话」新信提示（朱砂印章色） */
+    .nav-dot {
+      display: none; min-width: 16px; height: 16px; padding: 0 4px;
+      margin-left: 5px; border-radius: 999px; vertical-align: 2px;
+      background: var(--vermilion); color: #fff;
+      font-size: 10.5px; font-family: var(--mono); line-height: 16px;
+      text-align: center; font-style: normal;
+    }
+    .nav-dot.on { display: inline-block; }
 
     /* ---- 报头 ---- */
     .masthead { display: flex; align-items: flex-end; gap: 18px; padding: 30px 0 18px; border-bottom: 2px solid var(--ink); }
@@ -173,6 +182,31 @@
     .src-self { color: var(--ink-2); }
     .src-boss { color: var(--vermilion); }
 
+    /* ---- 任务时间线（台账展开行）：账房流水竖排 ---- */
+    tr.tl-row > td { background: var(--paper-deep); border-bottom: 1px solid var(--line); }
+    .tl-wrap { padding: 4px 6px 6px 22px; position: relative; }
+    .tl-wrap::before {   /* 左侧竖线（墨线） */
+      content: ""; position: absolute; left: 7px; top: 10px; bottom: 10px;
+      width: 1px; background: var(--line);
+    }
+    .tl-meta { font-size: 12px; color: var(--ink-2); margin: 0 0 8px;
+               padding-bottom: 6px; border-bottom: 1px dashed var(--line); }
+    .tl-node { position: relative; padding: 2.5px 0; font-size: 12.5px;
+               display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+    .tl-node::before {   /* 节点朱砂点 */
+      content: ""; position: absolute; left: -19px; top: 8px;
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--vermilion); transform: translateY(-2px);
+    }
+    .tl-node.tl-head::before { background: var(--ink); }
+    .tl-at { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
+             font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .tl-move { font-weight: 600; color: var(--ink); white-space: nowrap; }
+    .tl-actor { color: var(--indigo); font-family: var(--mono); font-size: 11.5px; }
+    .tl-remark { color: var(--ink-3); font-size: 12px; }
+    .tl-dwell { color: var(--ochre); font-family: var(--mono); font-size: 11px;
+                white-space: nowrap; }
+
     /* ---- 操作反馈：朱批 ---- */
     #opMsg {
       margin: 0 0 14px; padding: 9px 14px; border-left: 3px solid var(--vermilion);
@@ -234,7 +268,7 @@
       <nav class="anchors">
         <a href="#cockpit">驾驶舱</a><a href="#approvalSection">审批</a><a href="#perfSection">绩效</a>
         <a href="#pointsSection">积分榜</a><a href="#financeSection">CFO 周报</a><a href="#plansSection">计划</a>
-        <a href="#orgSection">组织</a><a href="#employeesSection">花名册</a><a href="#workloadSection">负荷</a><a href="#chatSection">对话</a>
+        <a href="#orgSection">组织</a><a href="#employeesSection">花名册</a><a href="#workloadSection">负荷</a><a href="#chatSection">对话<i id="msgDot" class="nav-dot"></i></a>
       </nav>
     </div>
   </header>
@@ -529,7 +563,9 @@
       const days = Math.floor(h / 24);
       const txt = days >= 1 ? `超期${days}天` : `超期${Math.max(1, Math.round(h))}时`;
       const due = esc(t.due_at.slice(0, 16).replace('T', ' '));
-      return ` <span class="wait-badge late" title="截止 ${due} 已过">⚠${txt}</span>`;
+      const urges = (t.urge_log || []).length;
+      const escBadge = urges ? ` <span class="wait-badge" title="已催办 ${urges} 次${urges > 1 ? '（未响应会逐级抄送上级）' : ''}">催${urges}</span>` : '';
+      return ` <span class="wait-badge late" title="截止 ${due} 已过">⚠${txt}</span>${escBadge}`;
     }
 
     // 待验收积压 + 超期预警计数：任务台账标题一眼看到交付黑洞和风险
@@ -637,6 +673,56 @@
       opFeedback(ok, data, status);
     }
 
+    // ---- 任务时间线：每单流转历史可追溯（flow_log 逐条 + 停留时长）----
+    function tlOpen() {
+      if (!window._tlOpen) window._tlOpen = new Set();
+      return window._tlOpen;
+    }
+
+    function toggleTimeline(id) {
+      const open = tlOpen();
+      open.has(id) ? open.delete(id) : open.add(id);
+      renderTasks();
+    }
+
+    // 时长口语化：3分 / 2时 / 5天
+    function dwellText(ms) {
+      if (!isFinite(ms) || ms <= 0) return '';
+      const min = ms / 60000;
+      return min < 60 ? `${Math.max(1, Math.round(min))}分`
+           : min < 1440 ? `${Math.round(min / 60)}时`
+           : `${Math.round(min / 1440)}天`;
+    }
+
+    function timelineHtml(t) {
+      // 节点 = 提交（created_at）+ 每次状态流转（flow_log 有序追加）
+      const nodes = [{
+        at: t.created_at, from: '', to: t.state ? 'pending' : '',
+        actor: t.created_by, remark: `提交《${t.title}》`,
+      }].concat(t.flow_log || []);
+      const rows = nodes.map((n, i) => {
+        const at = (n.at || '').slice(0, 16).replace('T', ' ');
+        const move = i === 0 ? '提交立项'
+          : `${STATE_LABEL[n.from] || n.from || '—'} → ${STATE_LABEL[n.to] || n.to}`;
+        // 停留时长：本节点距上一节点的时间差（卡在哪个环节一目了然）
+        const prev = i > 0 ? nodes[i - 1].at : '';
+        const dwell = i > 0 && prev && n.at
+          ? dwellText(new Date(n.at) - new Date(prev)) : '';
+        return `<div class="tl-node${i === 0 ? ' tl-head' : ''}">` +
+          `<span class="tl-at">${esc(at)}</span><span class="tl-move">${esc(move)}</span>` +
+          (n.actor ? `<span class="tl-actor">${esc(n.actor)}</span>` : '') +
+          (n.remark ? `<span class="tl-remark">${esc(n.remark)}</span>` : '') +
+          (dwell ? `<span class="tl-dwell" title="上一环节到此停留">⏳${esc(dwell)}</span>` : '') +
+          `</div>`;
+      }).join('');
+      const meta = `提交人 ${esc(t.created_by || '—')} · 承接人 ${esc(t.assignee || '未指派')}` +
+        ` · 返工 ${t.review_round || 0} 轮 · 现状 ${esc(STATE_LABEL[t.state] || t.state)}` +
+        (t.block_reason ? ` · 阻塞原因：${esc(t.block_reason)}` : '') +
+        ` · 截止 ${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '不限期'}`;
+      return `<tr class="tl-row"><td colspan="7"><div class="tl-wrap">` +
+        `<p class="tl-meta">${meta}</p>${rows}</div></td></tr>`;
+    }
+
     function renderTasks() {
       const tasks = window._tasks || [];
       const filter = document.getElementById('taskStateFilter').value;
@@ -653,6 +739,9 @@
       document.querySelector('#tasks tbody').innerHTML = shown.length
         ? shown.map(t => {
           const acts = [];
+          // 详情：任何状态都有流转历史可看（含终态任务的审计回溯）
+          const open = tlOpen().has(t.id);
+          acts.push(`<button class="tl-btn${open ? ' vermilion' : ''}" onclick="toggleTimeline('${esc(t.id)}')">详情${open ? '▲' : '▼'}</button>`);
           if (t.state === 'blocked') {
             acts.push(`<button onclick="retryTask('${esc(t.id)}')">重新执行</button>`);
           } else if (overdueHours(t) > 0) {
@@ -665,7 +754,8 @@
           `<td>${esc(STATE_LABEL[t.state] || t.state)}${waitBadge(t)}${t.block_reason ? ` <span class="hint" title="${esc(t.block_reason)}">ⓧ原因</span>` : ''}</td>` +
           `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}${overdueBadge(t)}</td>` +
           `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td>` +
-          `<td>${acts.length ? acts.join(' ') : '—'}</td></tr>`;
+          `<td>${acts.join(' ')}</td></tr>` +
+          (open ? timelineHtml(t) : '');   // 展开行：紧跟任务行
         }).join('')
         : '<tr><td colspan="7" class="empty">无匹配任务（换个筛选条件试试）</td></tr>';
       // 全选框态同步：当前可见待派任务全勾才亮（部分勾 = 半选态浏览器自渲染）
@@ -748,6 +838,7 @@
           ' <a href="#" onclick="doLogout();return false;">退出</a>');
         from.value = me.id;
         from.disabled = true;   // 登录后锁定身份，防手改
+        loadUnread();           // 登录/每轮刷新：拉本人未读数点亮红点
         for (const id of personal) {
           const el = document.getElementById(id);
           el.value = (scoped[role] || personal).includes(id) ? me.id : el.value;
@@ -767,6 +858,7 @@
         info.textContent = '';
         from.disabled = false;
         for (const id of personal) document.getElementById(id).disabled = false;
+        loadUnread();           // 登出：熄红点（loadUnread 见未登录即清除）
         window._canManage = true;
         document.getElementById('assignRow').style.display = '';
         document.getElementById('acceptRow').style.display = '';
@@ -1188,6 +1280,16 @@
       for (const m of all) {
         chatLine(m.from === from ? 'me' : 'ai', `${m.from} → ${m.to}`, m.content);
       }
+      // 查看即已读：本人查自己历史 → 同步清红点
+      if (window._me?.id && from === window._me.id && inbox?.length) {
+        try {
+          await fetch('/api/messages/read', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ who: from }),
+          });
+        } catch (e) { /* 标记失败不影响查看 */ }
+        loadUnread();
+      }
     }
 
     async function loadOrg() {
@@ -1247,6 +1349,21 @@
       document.getElementById('assignTo').value = id;
     }
 
+    // 未读红点：导航「对话」新信提示（登录人自己的收件箱口径）
+    async function loadUnread() {
+      const who = window._me?.id;
+      const dot = document.getElementById('msgDot');
+      if (!dot) return;
+      if (!who) { dot.classList.remove('on'); return; }   // 未登录：不亮
+      try {
+        const resp = await fetch(`/api/messages/unread?who=${encodeURIComponent(who)}`);
+        if (!resp.ok) { dot.classList.remove('on'); return; }
+        const { unread } = await resp.json();
+        dot.textContent = unread > 99 ? '99+' : String(unread);
+        dot.classList.toggle('on', unread > 0);
+      } catch (e) { /* 网络抖动：红点保持现状 */ }
+    }
+
     async function loadMessages() {
       const who = document.getElementById('msgWho').value.trim();
       if (!who) { alert('请输入员工 id'); return; }
@@ -1257,6 +1374,16 @@
         ? data.inbox.map(row).join('') : '<tr><td colspan="3" class="empty">收件箱为空</td></tr>';
       document.querySelector('#msgSent tbody').innerHTML = data.sent.length
         ? data.sent.map(row).join('') : '<tr><td colspan="3" class="empty">发件箱为空</td></tr>';
+      // 查看即已读：本人查自己的收件箱 → 清红点（别人代查不动他人未读）
+      if (window._me?.id && who === window._me.id && data.inbox?.length) {
+        try {
+          await fetch('/api/messages/read', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ who }),
+          });
+        } catch (e) { /* 标记失败不影响查看 */ }
+        loadUnread();
+      }
     }
 
     async function loadQueue() {
@@ -1331,6 +1458,16 @@
           chatLine('ai', to, '（已投递到对方收件箱：收件人是人类员工，请通过其消息渠道查看回复）');
         } else {
           chatLine('ai', to, data.reply);
+          // 对话里当场读过的回复 = 已读，防红点误亮
+          if (window._me?.id && from === window._me.id) {
+            try {
+              await fetch('/api/messages/read', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ who: from }),
+              });
+            } catch (e) { /* 失败由下轮刷新兜底 */ }
+            loadUnread();
+          }
         }
       } catch (e) {
         busy.remove();

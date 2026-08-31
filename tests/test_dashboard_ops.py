@@ -734,5 +734,201 @@ class TestAssignAuto(unittest.TestCase):
             assign_task_auto(st, "T-D1", "dev")   # assigned 不能再派
 
 
+class TestTimelineUrgeUnread(unittest.TestCase):
+    """#17 任务时间线 / #18 催办升级链 / #19 消息未读红点。
+
+    组织：worker → mgr → boss（两级上级链，供逐级抄送升级）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        st = JsonStore(tempfile.mkdtemp())
+        boss = Employee(id="boss", name="老板", kind="human")
+        boss.permissions["role"] = "admin"
+        st.save_employee(boss)
+        st.save_employee(Employee(
+            id="mgr", name="中干", kind="human", department="dept",
+            reports_to="boss"))
+        st.save_employee(Employee(
+            id="worker", name="干活的", kind="human", department="dept",
+            reports_to="mgr"))
+        cls.store = st
+        cls.server = DashboardServer(st, port=0)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.client = _Client(f"http://127.0.0.1:{cls.server.port}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _overdue_task(self, title: str) -> str:
+        _, sub = self.client.post("/api/task/submit",
+                                  {"title": title, "due_at": "2023-01-01"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "worker"})
+        return tid
+
+    # ---- #17 任务时间线：flow_log 逐节点可追溯 ----
+    def test_task_flow_log_timeline_traceable(self):
+        """时间线数据源：提交→（分拣/规划/评审）→派单→开工，flow_log 每节点带时间/角色/前后状态。"""
+        _, sub = self.client.post("/api/task/submit", {"title": "时间线任务"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "worker"})
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="worker", remark="开工")
+        self.store.save_task(t)
+        _, tasks = self.client.get("/api/tasks")
+        d = next(x for x in tasks if x["id"] == tid)
+        self.assertIn("urge_log", d)   # 催办历史随任务序列化（升级链可追溯）
+        self.assertEqual(d["urge_log"], [])
+        # 节点序列：派单走完整流水线（前端据此画时间线 + 算停留时长）
+        self.assertEqual([n["to"] for n in d["flow_log"]],
+                         ["triage", "planning", "review", "assigned", "doing"])
+        self.assertEqual([n["from"] for n in d["flow_log"]],
+                         ["pending", "triage", "planning", "review", "assigned"])
+        for n in d["flow_log"]:
+            self.assertTrue(n["at"])     # 时间戳齐全 → 停留时长可算
+            self.assertTrue(n["actor"])  # 操作者齐全 → 责任可追溯
+        self.assertTrue(d["created_at"])  # 「提交立项」起点
+
+    # ---- #18 催办升级链 ----
+    def test_urge_escalation_ladder(self):
+        """连续未响应逐级升级：第 2 次抄送直属上级，第 3 次到上级的上级（发起人本人则不重复抄）。"""
+        from laoban.core.messenger import inbox
+        tid = self._overdue_task("升级阶梯")
+        # 第 1 次：无历史催办，不升级
+        _, b1 = self.client.post("/api/task/urge", {"id": tid})
+        self.assertEqual(b1["urge_count"], 1)
+        self.assertIsNone(b1["escalated_to"])
+        # 第 2 次：期间 worker 无动作 → 抄送直属上级 mgr
+        _, b2 = self.client.post("/api/task/urge", {"id": tid})
+        self.assertEqual(b2["escalated_to"], "mgr")
+        hit = [m for m in inbox(self.store, "mgr")
+               if m.get("task_id") == tid and "催办升级" in m["content"]]
+        self.assertEqual(len(hit), 1)
+        self.assertIn("worker", hit[0]["content"])   # 升级信点名承接人
+        # 第 3 次：仍未响应 → 上级的上级 = boss（免鉴权代发人本人，无需抄自己）
+        _, b3 = self.client.post("/api/task/urge", {"id": tid})
+        self.assertEqual(b3["escalated_to"], "boss")
+        self.assertIn("无需抄送", b3["message"])
+        # urge_log 落盘：何时催的、谁催的、催给谁、升级给了谁
+        t = self.store.load_task(tid)
+        self.assertEqual([u["escalated_to"] for u in t.urge_log],
+                         ["", "mgr", "boss"])
+        self.assertEqual({u["by"] for u in t.urge_log}, {"boss"})
+        self.assertEqual({u["to"] for u in t.urge_log}, {"worker"})
+
+    def test_urge_responsive_no_escalation(self):
+        """上次催办后有动作 → 本次不升级（升级链只惩罚装死，响应即止损）。"""
+        tid = self._overdue_task("响应了就不升级")
+        self.client.post("/api/task/urge", {"id": tid})
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="worker", remark="开工回应")
+        self.store.save_task(t)
+        _, b = self.client.post("/api/task/urge", {"id": tid})
+        self.assertIsNone(b["escalated_to"])
+        self.assertIn("上次催办后有动作", b["message"])
+        # 窗口重置后再装死：升级从直属上级重新数起（不累积历史）
+        _, b2 = self.client.post("/api/task/urge", {"id": tid})
+        self.assertEqual(b2["escalated_to"], "mgr")
+
+    def test_escalation_target_chain_safety(self):
+        """升级目标：断链 / 悬空（指向不存在员工）/ 环（A→B→A）→ 不升级；跳数不超链长。"""
+        import types
+        from laoban.dashboard.server import _Handler
+        st = self.store
+        st.save_employee(Employee(id="cyc-a", name="甲", reports_to="cyc-b"))
+        st.save_employee(Employee(id="cyc-b", name="乙", reports_to="cyc-a"))
+        st.save_employee(Employee(id="orphan", name="孤儿", reports_to="ghost"))
+        f = _Handler._escalation_target   # 只依赖 self.store，借壳调用
+        h = types.SimpleNamespace(store=st)
+        self.assertEqual(f(h, "worker", 0), "mgr")   # 0 跳 = 直属上级
+        self.assertEqual(f(h, "worker", 1), "boss")  # 1 跳 = 上级的上级
+        self.assertIsNone(f(h, "worker", 2))         # 超链长
+        self.assertEqual(f(h, "cyc-a", 0), "cyc-b")  # 互指也只到一层（有界）
+        self.assertIsNone(f(h, "cyc-a", 1))          # 环 → 不再上溯
+        self.assertIsNone(f(h, "boss", 0))           # 断链（无上级）
+        self.assertIsNone(f(h, "orphan", 0))         # 悬空（上级不存在）
+
+    # ---- #19 消息未读红点 ----
+    def test_unread_count_and_mark_read(self):
+        """红点口径：新信未读 → 查看全标已读（幂等）→ 新信再亮。"""
+        from laoban.core.messenger import send, unread_count, mark_read, inbox
+        send(self.store, "boss", "worker", "第一封")
+        send(self.store, "boss", "worker", "第二封")
+        self.assertEqual(unread_count(self.store, "worker"), 2)
+        self.assertEqual(mark_read(self.store, "worker"), 2)
+        self.assertEqual(unread_count(self.store, "worker"), 0)
+        self.assertTrue(all(m.get("read_at")
+                            for m in inbox(self.store, "worker")))
+        self.assertEqual(mark_read(self.store, "worker"), 0)   # 幂等
+        send(self.store, "boss", "worker", "又来一封")
+        self.assertEqual(unread_count(self.store, "worker"), 1)
+
+    def test_messages_unread_read_api(self):
+        """红点 API：GET unread 计数 / POST read 清零；缺 who → 400。"""
+        from laoban.core.messenger import send
+        send(self.store, "boss", "worker", "红点信 1")
+        send(self.store, "boss", "worker", "红点信 2")
+        status, body = self.client.get("/api/messages/unread?who=worker")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["who"], "worker")
+        self.assertGreaterEqual(body["unread"], 2)
+        status, body = self.client.post("/api/messages/read", {"who": "worker"})
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(body["read"], 2)
+        _, body = self.client.get("/api/messages/unread?who=worker")
+        self.assertEqual(body["unread"], 0)
+        # 缺 who → 400
+        status, _ = self.client.post("/api/messages/read", {})
+        self.assertEqual(status, 400)
+        status, _ = self.client.get("/api/messages/unread")
+        self.assertEqual(status, 400)
+
+
+class TestUnreadRbac(unittest.TestCase):
+    """未读红点权限：不能替别人消费未读（查看/标记仅限本人）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.store, cls.auth = _mk_auth_store()
+        cls.server = DashboardServer(cls.store, port=0, auth=cls.auth)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def _login(self, emp_id, pw):
+        c = _Client(self.base)
+        c.login(emp_id, pw)
+        return c
+
+    def test_mark_read_only_self(self):
+        from laoban.core.messenger import send, unread_count
+        # 老板给 emp-chen 发信 → 未读 +1
+        send(self.store, "boss", "emp-chen", "给你的信")
+        self.assertGreater(unread_count(self.store, "emp-chen"), 0)
+        # 任何人不可代标记（查看即已读只能发生在收件人自己身上）
+        a = self._login("boss", "pw-boss")
+        status, _ = a.post("/api/messages/read", {"who": "emp-chen"})
+        self.assertEqual(status, 403)
+        # manager 可看下属绩效但不可看私信：未读数也不行（RBAC 口径一致）
+        m = self._login("mgr-dev", "pw-mgr")
+        status, _ = m.get("/api/messages/unread?who=emp-chen")
+        self.assertEqual(status, 403)
+        # 本人可看可清
+        c = self._login("emp-chen", "pw-chen")
+        status, _ = c.get("/api/messages/unread?who=emp-chen")
+        self.assertEqual(status, 200)
+        status, body = c.post("/api/messages/read", {"who": "emp-chen"})
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(body["read"], 1)
+        self.assertEqual(unread_count(self.store, "emp-chen"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

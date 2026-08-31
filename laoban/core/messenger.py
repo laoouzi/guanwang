@@ -17,7 +17,10 @@ def _msg_path(store: JsonStore, msg_id: str):
 
 def send(store: JsonStore, from_id: str, to_id: str, content: str,
          task_id: str = "") -> dict[str, Any]:
-    """点对点消息：权限校验（collaboration 白名单，空 = 组织内默认开放）→ 落盘。"""
+    """点对点消息：权限校验（collaboration 白名单，空 = 组织内默认开放）→ 落盘。
+
+    新消息天然未读（无 read_at 字段）；收件人查看后由 mark_read 补记。
+    """
     if not content.strip():
         raise ValueError("消息内容不能为空")
     sender = store.load_employee(from_id)
@@ -57,3 +60,24 @@ def inbox(store: JsonStore, who: str) -> list[dict[str, Any]]:
 
 def sent(store: JsonStore, who: str) -> list[dict[str, Any]]:
     return _list(store, "from", who)
+
+
+def unread_count(store: JsonStore, who: str) -> int:
+    """未读数：收件箱中没有 read_at 的消息（红点口径）。"""
+    return sum(1 for m in inbox(store, who) if not m.get("read_at"))
+
+
+def mark_read(store: JsonStore, who: str) -> int:
+    """收件箱全部标记已读（查看即已读）。
+
+    逐条原子回写 read_at（幂等：已读的跳过）；
+    返回本次新标记条数。
+    """
+    n = 0
+    for m in inbox(store, who):
+        if m.get("read_at"):
+            continue
+        m["read_at"] = utcnow()
+        store._atomic_write(_msg_path(store, m["id"]), m)
+        n += 1
+    return n

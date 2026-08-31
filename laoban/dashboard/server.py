@@ -324,6 +324,21 @@ class _Handler(BaseHTTPRequestHandler):
             status, payload = self.feishu.handle(self._read_body())
             return self._json(payload, status)
 
+        if u.path == "/api/messages/read":
+            # 查看即已读：收件人自己清红点（不能替别人消费未读）
+            body = self._read_body()
+            who = str(body.get("who", "")).strip()
+            if not who:
+                return self._error(400, "缺少 who")
+            if self.auth and self.auth.enabled():
+                _, me = self._view()
+                if me is None:
+                    return self._error(401, "请先登录")
+                if who != me.id:
+                    return self._error(403, "只能标记自己的收件箱为已读")
+            from ..core.messenger import mark_read
+            return self._json({"who": who, "read": mark_read(self.store, who)})
+
         # ---- 任务操作 / 审批决策 / 编制申请（老板驾驶舱）----
         if u.path in ("/api/task/submit", "/api/task/assign",
                       "/api/task/assign-batch",
@@ -636,8 +651,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _op_urge(self, role: str, me, body: dict):
         """催办：超期在飞任务 → 站内信通知承接人（事前干预）。
 
-        超时追责（验收时 -2 分）是事后诸葛；超期的价值在于还来得及
-        催——老板看到红牌点一下，承接人立刻收到催办信。
+        升级链：催过但承接人始终未响应（上次催办后 flow_log 无其动作）
+        → 再次催办沿 reports_to 链逐级抄送上级（第 1 次升级给直属上级，
+        第 2 次给上级的上级……），催办记录落 task.urge_log 可追溯。
         """
         from ..core.task import WAITING_HUMAN
         from ..core.messenger import send
@@ -680,6 +696,7 @@ class _Handler(BaseHTTPRequestHandler):
         days = (now_dt - due).total_seconds() / 86400
         overdue = f"{days:.0f} 天" if days >= 1 else f"{days * 24:.0f} 小时"
         due_show = task.due_at[:16].replace("T", " ")
+        urge_count = len(task.urge_log) + 1
         try:
             send(self.store, sender_id, assignee,
                  f"【催办】任务 {task.id}《{task.title}》已超期 {overdue}"
@@ -687,9 +704,77 @@ class _Handler(BaseHTTPRequestHandler):
                  task_id=task.id)
         except (ValueError, KeyError, PermissionDenied) as e:
             return self._error(409, f"催办信发送失败：{e}")
+
+        # ---- 升级链：连续未响应催办 → 沿 reports_to 逐级抄送 ----
+        # 窗口口径：第 i 次催办 → 第 i+1 次催办（最后一次 = 到现在），
+        # 承接人在窗口内 flow_log 无动作 = 该次催办未响应；
+        # 末尾连续未响应 N 次 → 本次升级到第 N-1 跳上级
+        # （N=1 → 直属上级；N=2 → 上级的上级……）。
+        escalated_to, escalate_note = "", ""
+        prior = task.urge_log
+        unresponsive = 0
+        if prior:
+            for i in range(len(prior) - 1, -1, -1):
+                u_at = prior[i].get("at", "")
+                nxt_at = prior[i + 1].get("at", "") if i + 1 < len(prior) else ""
+                acted = any(
+                    log.get("actor") == assignee and log.get("at", "") > u_at
+                    and (not nxt_at or log.get("at", "") <= nxt_at)
+                    for log in task.flow_log)
+                if acted:
+                    break
+                unresponsive += 1
+        if unresponsive >= 1:
+            target = self._escalation_target(assignee, unresponsive - 1)
+            if target is None:
+                escalate_note = (f"（已催 {urge_count} 次未响应，"
+                                 "承接人无上级可升级）")
+            elif target == sender_id:
+                escalated_to = target
+                escalate_note = (f"（第 {urge_count} 次催办未响应，"
+                                 "升级对象是你本人，无需抄送）")
+            else:
+                try:
+                    send(self.store, sender_id, target,
+                         f"【催办升级】任务 {task.id}《{task.title}》"
+                         f"已催 {urge_count} 次未响应，超期 {overdue}，"
+                         f"承接人 {assignee}，请介入处理。",
+                         task_id=task.id)
+                    escalated_to = target
+                    escalate_note = f"（第 {urge_count} 次催办未响应，已抄送上级 {target}）"
+                except (ValueError, KeyError, PermissionDenied) as e:
+                    escalate_note = f"（升级信发送失败：{e}）"
+        elif prior:
+            escalate_note = "（承接人上次催办后有动作，本次不升级）"
+        task.urge_log.append({
+            "at": utcnow(), "by": sender_id, "to": assignee,
+            "escalated_to": escalated_to,
+        })
+        self.store.save_task(task)
+        msg = f"已催办 {assignee}（第 {urge_count} 次，超期 {overdue}）{escalate_note}"
         return self._json({"id": task.id, "state": task.state,
                            "assignee": assignee,
-                           "message": f"已催办 {assignee}（超期 {overdue}）"})
+                           "urge_count": urge_count,
+                           "escalated_to": escalated_to or None,
+                           "message": msg})
+
+    def _escalation_target(self, assignee_id: str, hops: int) -> str | None:
+        """沿 reports_to 链向上找第 hops 跳的上级（0 = 直属上级）。
+
+        断链（含指向不存在的员工）/ 循环（A→B→A）→ None；跳数超链长也返回 None。
+        """
+        seen = {assignee_id}
+        cur = assignee_id
+        for _ in range(max(0, hops) + 1):
+            emp = self.store.load_employee(cur)
+            if not emp:
+                return None
+            up = (emp.reports_to or "").strip()
+            if not up or up in seen:
+                return None
+            seen.add(up)
+            cur = up
+        return cur if self.store.load_employee(cur) else None
 
     def _op_report(self, role: str, me, body: dict):
         """人类员工汇报交付：ASSIGNED → DOING → REPORTING（等验收）。
@@ -1053,6 +1138,15 @@ class _Handler(BaseHTTPRequestHandler):
                 "inbox": msg_inbox(self.store, who),
                 "sent": msg_sent(self.store, who),
             })
+        if u.path == "/api/messages/unread":
+            # 未读红点：收件人视角的新信计数（谁登录谁的红点）
+            who = self._who_required(u)
+            if who is None:
+                return
+            if not rbac.can_view_messages(self.store, me, role, who):
+                return self._error(403, "只能查看自己的未读数")
+            from ..core.messenger import unread_count
+            return self._json({"who": who, "unread": unread_count(self.store, who)})
         if u.path == "/api/queue":
             who = self._who_required(u)
             if who is None:

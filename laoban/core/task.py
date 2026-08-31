@@ -48,6 +48,8 @@ class Task:
     updated_at: str = field(default_factory=utcnow)
     flow_log: list[dict[str, Any]] = field(default_factory=list)
     progress_log: list[dict[str, Any]] = field(default_factory=list)
+    # 催办记录：{at, by, to, escalated_to}（升级链判定「催过未响应」用）
+    urge_log: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -66,6 +68,7 @@ class Task:
             "updated_at": self.updated_at,
             "flow_log": self.flow_log,
             "progress_log": self.progress_log,
+            "urge_log": self.urge_log,
         }
 
     @classmethod
@@ -86,4 +89,5 @@ class Task:
             updated_at=d.get("updated_at", utcnow()),
             flow_log=d.get("flow_log", []),
             progress_log=d.get("progress_log", []),
+            urge_log=d.get("urge_log", []),
         )
