@@ -115,6 +115,62 @@ class TestOpsFreeAuth(unittest.TestCase):
                                         {"id": body["id"], "score": 3})
         self.assertEqual(status, 409)
 
+    def test_batch_assign_partial_success(self):
+        """批量派发：部分成功语义 + 去重保序 + 逐条失败原因。"""
+        from laoban.core.workstation import queue_of
+        _, a = self.client.post("/api/task/submit", {"title": "批A"})
+        _, b = self.client.post("/api/task/submit", {"title": "批B"})
+        _, c = self.client.post("/api/task/submit", {"title": "批C"})
+        # B 先单独派给 emp-chen（占位：批量派 B 必失败）
+        self.client.post("/api/task/assign", {"id": b["id"], "to": "emp-chen"})
+        status, body = self.client.post("/api/task/assign-batch",
+                                        {"ids": [a["id"], b["id"], c["id"],
+                                                 a["id"],   # 重复项应被去重
+                                                 "T-nope"],  # 不存在的任务
+                                         "to": "dev"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["ok_count"], 2)   # A、C 成功
+        self.assertEqual(body["fail_count"], 2)  # B 状态不符 + T-nope 不存在
+        self.assertEqual(body["assigned"], [a["id"], c["id"]])   # 保序
+        by_id = {r["id"]: r for r in body["results"]}
+        self.assertTrue(by_id[b["id"]]["ok"] is False)
+        # 失败原因：B 已派给 emp-chen，再派触发非法状态转换（定位靠 id 字段）
+        self.assertIn("assigned", by_id[b["id"]]["error"])
+        self.assertIn("不存在", by_id["T-nope"]["error"])
+        self.assertIn("2/4", body["message"])   # 汇总口径（去重后 4 条）
+        # 工位队列：A、C 入 dev 队列；B 在 emp-chen 队列
+        q = queue_of(self.store, "dev")
+        self.assertIn(a["id"], q)
+        self.assertIn(c["id"], q)
+        self.assertNotIn(b["id"], q)
+        self.assertIn(b["id"], queue_of(self.store, "emp-chen"))
+        # 重复项只派一次
+        self.assertEqual(q.count(a["id"]), 1)
+
+    def test_batch_assign_validation_and_all_fail(self):
+        """批量派发参数校验（400）与全失败（409）。"""
+        # 参数校验
+        for bad in ({}, {"ids": ["T-x"]}, {"to": "dev"}, {"to": "dev", "ids": []},
+                    {"to": "dev", "ids": "T-x"}, {"to": "dev", "ids": ["  "]}):
+            status, _ = self.client.post("/api/task/assign-batch", bad)
+            self.assertEqual(status, 400, f"应 400：{bad}")
+        # 全失败：两条都已派发 → 409 带逐条原因
+        _, a = self.client.post("/api/task/submit", {"title": "已派1"})
+        _, b = self.client.post("/api/task/submit", {"title": "已派2"})
+        self.client.post("/api/task/assign", {"id": a["id"], "to": "dev"})
+        self.client.post("/api/task/assign", {"id": b["id"], "to": "dev"})
+        status, body = self.client.post("/api/task/assign-batch",
+                                        {"ids": [a["id"], b["id"]], "to": "emp-chen"})
+        self.assertEqual(status, 409)
+        self.assertIn("全部失败", body["error"])
+        self.assertIn(a["id"], body["error"])
+        # 派给不存在的员工：单条即全失败（KeyError 员工不存在）
+        _, c = self.client.post("/api/task/submit", {"title": "没人接"})
+        status, body = self.client.post("/api/task/assign-batch",
+                                        {"ids": [c["id"]], "to": "ghost"})
+        self.assertEqual(status, 409)
+        self.assertIn("不存在", body["error"])
+
     def test_low_score_records_failure(self):
         _, sub = self.client.post("/api/task/submit", {"title": "低分任务"})
         tid = sub["id"]
@@ -466,6 +522,41 @@ class TestOpsRbac(unittest.TestCase):
                if m.get("task_id") == tid]
         self.assertEqual(len(hit), 1)
         self.assertEqual(hit[0]["from"], "boss")
+
+    def test_staff_cannot_batch_assign(self):
+        a = self._login("boss", "pw-boss")
+        _, sub = a.post("/api/task/submit", {"title": "员工想批派"})
+        c = self._login("emp-chen", "pw-chen")
+        status, body = c.post("/api/task/assign-batch",
+                              {"ids": [sub["id"]], "to": "dev"})
+        self.assertEqual(status, 403)
+        self.assertIn("仅管理员或部门负责人", body["error"])
+
+    def test_manager_batch_assign_dept_scope(self):
+        """manager 批量派发：本部门 OK；目标为外部门员工 → 403。"""
+        a = self._login("boss", "pw-boss")
+        _, s1 = a.post("/api/task/submit", {"title": "本部门批1"})
+        _, s2 = a.post("/api/task/submit", {"title": "本部门批2"})
+        m = self._login("mgr-dev", "pw-mgr")
+        status, body = m.post("/api/task/assign-batch",
+                              {"ids": [s1["id"], s2["id"]], "to": "dev"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["ok_count"], 2)
+        from laoban.core.workstation import queue_of
+        for tid in (s1["id"], s2["id"]):
+            self.assertIn(tid, queue_of(self.store, "dev"))
+        # 跨部门承接人：fin_dept 的 fin → 403（整批拒，一条都不动）
+        _, s3 = a.post("/api/task/submit", {"title": "外部门目标"})
+        status, body = m.post("/api/task/assign-batch",
+                              {"ids": [s3["id"]], "to": "fin"})
+        self.assertEqual(status, 403)
+        self.assertEqual(self.store.load_task(s3["id"]).state, "pending")
+        # 派给自己的部门成员含自己也可以（mgr-dev 是 dev_dept 成员）
+        _, s4 = a.post("/api/task/submit", {"title": "派给自己"})
+        status, body = m.post("/api/task/assign-batch",
+                              {"ids": [s4["id"]], "to": "mgr-dev"})
+        self.assertEqual(status, 200)
+        self.assertIn(s4["id"], queue_of(self.store, "mgr-dev"))
 
     def test_payroll_scope_by_role(self):
         """月报可见范围：admin 全公司 / manager 本部门 / staff 仅本人。"""

@@ -326,6 +326,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         # ---- 任务操作 / 审批决策 / 编制申请（老板驾驶舱）----
         if u.path in ("/api/task/submit", "/api/task/assign",
+                      "/api/task/assign-batch",
                       "/api/task/accept", "/api/task/report",
                       "/api/task/retry", "/api/task/urge",
                       "/api/approval/decide",
@@ -347,6 +348,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._op_submit(role, me, body)
             if path == "/api/task/assign":
                 return self._op_assign(role, me, body)
+            if path == "/api/task/assign-batch":
+                return self._op_assign_batch(role, me, body)
             if path == "/api/task/accept":
                 return self._op_accept(role, me, body)
             if path == "/api/task/report":
@@ -404,6 +407,54 @@ class _Handler(BaseHTTPRequestHandler):
         self.ledger.record_step(to)
         return self._json({"id": task.id, "state": task.state,
                            "message": f"任务已派发给 {to}（已入工位队列）"})
+
+    def _op_assign_batch(self, role: str, me, body: dict):
+        """批量派发：多任务一次派给一人（积压的分拣批量出货）。
+
+        与单派同源（assign_task_auto：状态机 + 工位队列 + 账本步数），
+        差异只在失败语义——部分成功：某条已派发/状态不符/不存在只记
+        该条失败（results 逐条带原因），不阻断其余任务出货；
+        全军覆没才返回 409（多半是参数/状态全错，提示人工看）。
+        ids 容错：去重保序、忽略空串/非字符串项。
+        """
+        to = str(body.get("to", "")).strip()
+        ids = body.get("ids")
+        if not to:
+            return self._error(400, "缺少 to")
+        if not isinstance(ids, list) or not ids:
+            return self._error(400, "缺少 ids（任务 id 列表）")
+        if role not in (rbac.ADMIN, rbac.MANAGER):
+            return self._error(403, "仅管理员或部门负责人可派单")
+        if role == rbac.MANAGER and to not in rbac.dept_members(self.store, me):
+            return self._error(403, "只能派发给本部门成员")
+        # 去重保序（前端勾选不会重，接口直调防脏数据）
+        seen: set[str] = set()
+        todo = [i for i in (str(x).strip() for x in ids)
+                if i and not (i in seen or seen.add(i))]
+        if not todo:
+            return self._error(400, "ids 中没有有效任务 id")
+        results = []
+        ok_ids = []
+        for tid in todo:
+            try:
+                task = assign_task_auto(self.store, tid, to,
+                                        actor=self._actor(me))
+                self.ledger.record_step(to)
+                ok_ids.append(tid)
+                results.append({"id": tid, "ok": True})
+            except (KeyError, ValueError, IllegalTransition) as e:
+                results.append({"id": tid, "ok": False, "error": str(e)})
+        if not ok_ids:
+            return self._error(409, "批量派发全部失败（"
+                               + "；".join(f"{r['id']}: {r['error']}"
+                                           for r in results) + "）")
+        fails = [f"{r['id']}: {r['error']}" for r in results if not r["ok"]]
+        msg = (f"批量派发：{len(ok_ids)}/{len(todo)} 成功"
+               + (f"；失败 {'；'.join(fails)}" if fails else ""))
+        return self._json({"assigned": ok_ids, "results": results,
+                           "ok_count": len(ok_ids),
+                           "fail_count": len(todo) - len(ok_ids),
+                           "message": msg})
 
     def _learn(self, assignee: str, emp, task, score: int, comment: str):
         """复盘并原子回写经验：LLM 在锁外算（避免长持锁），

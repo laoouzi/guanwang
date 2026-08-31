@@ -214,6 +214,9 @@
     #meInfo a { color: var(--vermilion); }
     #focusBar a { color: var(--vermilion); font-weight: 600; }
     #assignHint a { color: var(--vermilion); }
+    #batchHint a { color: var(--vermilion); }
+    /* staff 无派单权：勾选列整列隐藏（表头 + 行首格） */
+    #tasks.no-batch th:first-child, #tasks.no-batch td:first-child { display: none; }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -390,7 +393,13 @@
         <input id="taskWhoFilter" list="rosterIds" placeholder="按承接人筛（空 = 全部）" style="width:20%" onchange="renderTasks()" oninput="renderTasks()" />
         <span id="taskFilterMeta" class="msg-meta"></span>
       </p>
-      <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th><th>操作</th></tr></thead><tbody></tbody></table>
+      <p class="form-row" id="batchRow" style="display:none">
+        <span class="msg-meta">已勾选 <b id="batchCount">0</b> 件待派任务</span>
+        <input id="batchAssignTo" list="rosterIds" placeholder="批量派给谁（员工 id）" style="width:20%" />
+        <button onclick="batchAssign()">批量派发</button>
+        <span id="batchHint" class="msg-meta"></span>
+      </p>
+      <table id="tasks"><thead><tr><th><input type="checkbox" id="taskSelAll" title="全选待派任务" onchange="toggleSelAll(this.checked)" /></th><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th><th>操作</th></tr></thead><tbody></tbody></table>
     </section>
 
     <section class="sheet" id="plansSection">
@@ -568,11 +577,67 @@
       }
     }
 
+    // ---- 批量勾选（仅待分拣 pending 任务可勾，派发后自动失效）----
+    function batchSel() {
+      if (!window._batchSel) window._batchSel = new Set();
+      return window._batchSel;
+    }
+
+    function toggleBatchSel(id, checked) {
+      const sel = batchSel();
+      if (checked) sel.add(id); else sel.delete(id);
+      updateBatchRow();
+    }
+
+    function toggleSelAll(checked) {
+      const sel = batchSel();
+      const tasks = (window._tasks || []).filter(t =>
+        taskMatches(t, document.getElementById('taskStateFilter').value,
+                    document.getElementById('taskWhoFilter').value.trim()));
+      tasks.forEach(t => {
+        if (t.state === 'pending') checked ? sel.add(t.id) : sel.delete(t.id);
+      });
+      renderTasks();   // 同步行勾选态
+    }
+
+    function updateBatchRow() {
+      const row = document.getElementById('batchRow');
+      if (!row) return;
+      // 权限优先（loadMe 设 _canManage；staff 不可派单），
+      // 其次有无待派任务（无勾选对象整行隐藏）
+      const canManage = window._canManage !== false;
+      row.style.display = (canManage &&
+        (window._tasks || []).some(t => t.state === 'pending')) ? '' : 'none';
+      document.getElementById('batchCount').textContent = batchSel().size;
+      const btn = row.querySelector('button');
+      if (btn) btn.disabled = batchSel().size === 0;   // 0 件禁用防误点
+    }
+
+    async function batchAssign() {
+      const ids = [...batchSel()];
+      const to = document.getElementById('batchAssignTo').value.trim();
+      if (!ids.length || !to) { alert('请先勾选待派任务并填写承接人'); return; }
+      const { ok, data, status } = await opPost('/api/task/assign-batch', { ids, to });
+      if (ok) {
+        // 清掉已出货的勾选（失败的留着，老板可换单人再派；
+        // opFeedback → load() 会重渲染台账并清理失效勾选）
+        data.assigned.forEach(id => batchSel().delete(id));
+        document.getElementById('batchAssignTo').value = '';
+      }
+      opFeedback(ok, data, status);
+    }
+
     function renderTasks() {
       const tasks = window._tasks || [];
       const filter = document.getElementById('taskStateFilter').value;
       const who = document.getElementById('taskWhoFilter').value.trim();
       const shown = tasks.filter(t => taskMatches(t, filter, who));
+      const sel = batchSel();
+      // 勾选残留清理：已派发/完成的任务不再是合法选择
+      [...sel].forEach(id => {
+        const t = tasks.find(x => x.id === id);
+        if (!t || t.state !== 'pending') sel.delete(id);
+      });
       document.querySelector('#tasksSection h2').innerHTML =
         '任务台账' + backlogNote(tasks);
       document.querySelector('#tasks tbody').innerHTML = shown.length
@@ -583,15 +648,23 @@
           } else if (overdueHours(t) > 0) {
             acts.push(`<button class="vermilion" onclick="urgeTask('${esc(t.id)}')">催办</button>`);
           }
-          return `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td>` +
+          const chk = t.state === 'pending'
+            ? `<input type="checkbox" ${sel.has(t.id) ? 'checked' : ''} onchange="toggleBatchSel('${esc(t.id)}', this.checked)" title="勾选批量派发" />`
+            : '·';
+          return `<tr><td>${chk}</td><td>${esc(t.id)}</td><td>${esc(t.title)}</td>` +
           `<td>${esc(STATE_LABEL[t.state] || t.state)}${waitBadge(t)}${t.block_reason ? ` <span class="hint" title="${esc(t.block_reason)}">ⓧ原因</span>` : ''}</td>` +
           `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}${overdueBadge(t)}</td>` +
           `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td>` +
           `<td>${acts.length ? acts.join(' ') : '—'}</td></tr>`;
         }).join('')
-        : '<tr><td colspan="6" class="empty">无匹配任务（换个筛选条件试试）</td></tr>';
+        : '<tr><td colspan="7" class="empty">无匹配任务（换个筛选条件试试）</td></tr>';
+      // 全选框态同步：当前可见待派任务全勾才亮（部分勾 = 半选态浏览器自渲染）
+      const visiblePending = shown.filter(t => t.state === 'pending');
+      document.getElementById('taskSelAll').checked =
+        visiblePending.length > 0 && visiblePending.every(t => sel.has(t.id));
       document.getElementById('taskFilterMeta').textContent =
         tasks.length ? `显示 ${shown.length} / ${tasks.length} 件` : '';
+      updateBatchRow();
     }
 
     async function load() {
@@ -661,17 +734,23 @@
         }
         // 操作区按角色显隐：staff 只能提交；manager 派单+验收（本部门）；admin 全量
         const canManage = role === 'admin' || role === 'manager';
+        window._canManage = canManage;   // 批量派发行同步显隐
         document.getElementById('assignRow').style.display = canManage ? '' : 'none';
         document.getElementById('acceptRow').style.display = canManage ? '' : 'none';
+        // 勾选框列对 staff 无意义（无权派发）：CSS 整列隐藏
+        document.querySelector('#tasks').classList.toggle('no-batch', !canManage);
+        updateBatchRow();
         // 编制申请表单：仅 manager/admin 可提交（staff 无部门管理权）
         document.getElementById('hcFormRow').style.display = canManage ? '' : 'none';
       } else {
         info.textContent = '';
         from.disabled = false;
         for (const id of personal) document.getElementById(id).disabled = false;
+        window._canManage = true;
         document.getElementById('assignRow').style.display = '';
         document.getElementById('acceptRow').style.display = '';
         document.getElementById('hcFormRow').style.display = '';
+        updateBatchRow();
       }
     }
 
