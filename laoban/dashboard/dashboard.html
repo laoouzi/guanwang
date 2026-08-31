@@ -2,189 +2,417 @@
 <html lang="zh">
 <head>
   <meta charset="utf-8">
-  <title>laoban 管理看板</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>laoban · 老板驾驶舱</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 24px; background: #fafafa; }
-    h1 { margin-bottom: 8px; }
-    h2 { margin-top: 24px; }
-    table { border-collapse: collapse; width: 100%; background: #fff; }
-    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-    th { background: #f5f5f5; }
-    .kind { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
-    .kind.ai { background: #e3f2fd; color: #1565c0; }
-    .kind.human { background: #e8f5e9; color: #2e7d32; }
-    .src-ai_delegated { color: #1565c0; }
-    .src-self { color: #616161; }
-    .src-boss { color: #b71c1c; }
-    #who { padding: 4px; }
-    button { padding: 4px 12px; cursor: pointer; }
-    .status { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
-    .status.active { background: #e8f5e9; color: #2e7d32; }
-    .status.suspended { background: #fff3e0; color: #e65100; }
-    .status.terminated { background: #ffebee; color: #b71c1c; text-decoration: line-through; }
-    .dept { margin-top: 16px; }
-    .dept h3 { margin: 8px 0 4px; }
-    .queue-count { background: #e3f2fd; border-radius: 10px; padding: 0 8px; font-size: 12px; }
-    .msg-meta { color: #757575; font-size: 12px; }
-    .empty { color: #9e9e9e; padding: 8px; }
-    .chat-line { margin: 6px 0; padding: 6px 10px; border-radius: 8px; max-width: 80%; }
-    .chat-line.me { background: #e3f2fd; margin-left: auto; }
-    .chat-line.ai { background: #f1f8e9; }
-    .chat-line .who { font-size: 12px; color: #757575; }
-    .chat-line.busy { color: #9e9e9e; font-style: italic; }
-    #chatLog { display: flex; flex-direction: column; }
+    /* ============================================================
+       账房美学 Ledger & Ink —— 暖纸底 / 墨字 / 朱砂印章 / 账本横线
+       零外链字体（离线可用），数字一律 tabular-nums 便于看账。
+       ============================================================ */
+    :root {
+      --paper:      #f4efe4;   /* 案头纸 */
+      --paper-deep: #ece5d4;   /* 纸影 */
+      --card:       #faf7ef;   /* 账页卡 */
+      --ink:        #23201a;   /* 浓墨 */
+      --ink-2:      #5c5344;   /* 淡墨 */
+      --ink-3:      #8f8672;   /* 枯墨 */
+      --line:       #d9cfba;   /* 账线 */
+      --line-soft:  #e7dfcd;
+      --vermilion:  #b23a26;   /* 朱砂：主行动 */
+      --vermilion-ink: #8f2d1d;
+      --indigo:     #2f4d6b;   /* 靛青：AI */
+      --ochre:      #7d5a24;   /* 赭石：人类 */
+      --moss:       #48663d;   /* 苔绿：正向 / 金额 */
+      --amber:      #9a6a1a;   /* 琥珀：警示 */
+      --gold:       #8a6d1f;   /* 积分金 */
+      --shadow: 0 1px 2px rgba(60, 50, 30, .06), 0 6px 18px rgba(60, 50, 30, .07);
+      --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", serif;
+      --sans:  "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+      --mono:  "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", "Consolas", monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+    body {
+      margin: 0; color: var(--ink); font-family: var(--sans);
+      font-size: 14px; line-height: 1.6;
+      background:
+        repeating-linear-gradient(0deg, transparent 0 27px, rgba(180,165,130,.055) 27px 28px),
+        var(--paper);
+    }
+    body::before {   /* 纸面噪点，营造纸纤维质感 */
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E");
+    }
+    .wrap { position: relative; z-index: 1; max-width: 1240px; margin: 0 auto; padding: 0 28px 72px; }
+
+    /* ---- 顶栏：墨条 + 锚点导航 ---- */
+    header.topbar {
+      position: sticky; top: 0; z-index: 20;
+      background: var(--ink); color: #f0ead9;
+      border-bottom: 3px double var(--vermilion);
+    }
+    .topbar-inner {
+      max-width: 1240px; margin: 0 auto; padding: 10px 28px;
+      display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+    }
+    .brand { font-family: var(--serif); font-size: 19px; letter-spacing: 2px; white-space: nowrap; }
+    .brand .seal {
+      display: inline-grid; place-items: center; width: 26px; height: 26px;
+      margin-right: 9px; border: 1.5px solid var(--vermilion); border-radius: 50%;
+      color: #d96a52; font-size: 13px; font-family: var(--serif);
+      transform: rotate(-6deg); vertical-align: -6px;
+    }
+    .brand small { font-size: 12px; color: #b7ae97; letter-spacing: 3px; margin-left: 10px; font-family: var(--sans); }
+    nav.anchors { display: flex; gap: 2px; flex-wrap: wrap; margin-left: auto; }
+    nav.anchors a {
+      color: #cfc7b0; text-decoration: none; font-size: 12.5px;
+      padding: 3px 10px; border-radius: 3px; letter-spacing: 1px;
+    }
+    nav.anchors a:hover { color: #fff; background: rgba(255,255,255,.12); }
+
+    /* ---- 报头 ---- */
+    .masthead { display: flex; align-items: flex-end; gap: 18px; padding: 30px 0 18px; border-bottom: 2px solid var(--ink); }
+    .masthead h1 {
+      margin: 0; font-family: var(--serif); font-weight: 600;
+      font-size: 34px; letter-spacing: 6px; line-height: 1.15;
+    }
+    .masthead .sub { color: var(--ink-2); font-size: 13px; letter-spacing: 1px; padding-bottom: 6px; }
+    .masthead .ledger-no { margin-left: auto; text-align: right; color: var(--ink-3); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; padding-bottom: 4px; }
+
+    /* ---- 账页卡（section）---- */
+    section.sheet {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 6px; box-shadow: var(--shadow);
+      margin-top: 26px; padding: 20px 24px 22px;
+      animation: rise .5s ease both;
+    }
+    section.sheet:nth-of-type(1) { animation-delay: .05s; }
+    section.sheet:nth-of-type(2) { animation-delay: .10s; }
+    section.sheet:nth-of-type(3) { animation-delay: .15s; }
+    section.sheet:nth-of-type(4) { animation-delay: .20s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    section.sheet > h2 {
+      margin: -20px -24px 18px; padding: 11px 24px 10px;
+      font-family: var(--serif); font-size: 17.5px; font-weight: 600; letter-spacing: 2.5px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #f2ecdd, #ede5d2);
+      border-radius: 5px 5px 0 0;
+      display: flex; align-items: baseline; gap: 10px;
+    }
+    section.sheet > h2::before {   /* 朱砂角标 */
+      content: ""; width: 7px; height: 7px; background: var(--vermilion);
+      transform: rotate(45deg) translateY(-1px); flex: none;
+    }
+    section.sheet > h2 .hint { font-family: var(--sans); font-weight: 400; font-size: 12px; color: var(--ink-3); letter-spacing: 0; margin-left: auto; }
+
+    /* ---- 账本表格：只有横线，无竖线无框 ---- */
+    table { border-collapse: collapse; width: 100%; margin: 4px 0 8px; font-variant-numeric: tabular-nums; }
+    thead th {
+      text-align: left; font-weight: 600; font-size: 12px; color: var(--ink-2);
+      letter-spacing: 1.5px; padding: 7px 10px 6px;
+      border-top: 2px solid var(--ink); border-bottom: 1px solid var(--ink);
+      background: transparent;
+    }
+    tbody td { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+    tbody tr:hover { background: rgba(178, 58, 38, .045); }
+    tbody tr:last-child td { border-bottom: 1px solid var(--line); }
+    td:first-child { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+
+    /* ---- 表单 ---- */
+    input, select, textarea {
+      font: inherit; color: var(--ink); background: #fffdf7;
+      border: 1px solid var(--line); border-radius: 4px;
+      padding: 7px 10px; width: 170px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none; border-color: var(--vermilion);
+      box-shadow: 0 0 0 3px rgba(178, 58, 38, .12);
+    }
+    input::placeholder, textarea::placeholder { color: #b3a98f; }
+    input:disabled { background: var(--paper-deep); color: var(--ink-3); }
+    textarea { width: 100%; }
+    p.form-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 12px; }
+
+    button {
+      font: inherit; cursor: pointer; border-radius: 4px;
+      border: 1px solid var(--ink); background: var(--ink); color: #f5f0e2;
+      padding: 7px 18px; letter-spacing: 1px;
+      transition: transform .06s, background .15s, box-shadow .15s;
+      box-shadow: 0 1px 0 rgba(0,0,0,.25);
+    }
+    button:hover { background: #3a342a; }
+    button:active { transform: translateY(1px); box-shadow: none; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.vermilion { background: var(--vermilion); border-color: var(--vermilion-ink); }
+    button.vermilion:hover { background: #c74730; }
+
+    /* ---- 印章式徽章 ---- */
+    .kind, .status, .queue-count, .src-tag {
+      display: inline-block; font-size: 11.5px; letter-spacing: 1px;
+      padding: 1px 9px; border-radius: 999px; line-height: 1.7;
+      border: 1px solid currentColor; background: transparent; white-space: nowrap;
+    }
+    .kind.ai { color: var(--indigo); background: rgba(47, 77, 107, .08); }
+    .kind.human { color: var(--ochre); background: rgba(125, 90, 36, .08); }
+    .status.active { color: var(--moss); background: rgba(72, 102, 61, .08); }
+    .status.suspended { color: var(--amber); background: rgba(154, 106, 26, .09); }
+    .status.terminated { color: var(--vermilion); background: rgba(178, 58, 38, .08); text-decoration: line-through; }
+    .queue-count { color: var(--indigo); background: rgba(47, 77, 107, .07); font-family: var(--mono); }
+    .src-ai_delegated { color: var(--indigo); }
+    .src-self { color: var(--ink-2); }
+    .src-boss { color: var(--vermilion); }
+
+    /* ---- 操作反馈：朱批 ---- */
+    #opMsg {
+      margin: 0 0 14px; padding: 9px 14px; border-left: 3px solid var(--vermilion);
+      background: rgba(178, 58, 38, .06); border-radius: 0 4px 4px 0;
+      white-space: pre-wrap; font-family: var(--mono); font-size: 12.5px; color: var(--ink-2);
+      min-height: 0;
+    }
+
+    /* ---- 榜单 ---- */
+    .boards { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+    @media (max-width: 980px) { .boards { grid-template-columns: 1fr; } }
+    .board-title { font-family: var(--serif); font-size: 13.5px; color: var(--ink-2); letter-spacing: 2px; margin: 2px 0 6px; }
+    #ptsSummary, #plansScope {
+      margin: 0 0 10px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+      background: linear-gradient(180deg, #f4eedd, #efe7d3); border: 1px solid var(--line);
+      border-radius: 4px; letter-spacing: .5px; font-variant-numeric: tabular-nums;
+    }
+    #ptsRules { margin: 6px 0 0; }
+    .rank { color: var(--gold); font-family: var(--serif); }
+    #finCard { font-variant-numeric: tabular-nums; }
+    #finCard table { margin-top: 6px; }
+
+    /* ---- 组织架构 / 复盘 ---- */
+    .dept { margin: 0 0 18px; }
+    .dept h3 { margin: 0 0 6px; font-family: var(--serif); font-size: 14.5px; letter-spacing: 2px; color: var(--ink); border-bottom: 1px dashed var(--line); padding-bottom: 5px; }
+
+    /* ---- 对话 ---- */
+    #chatLog { display: flex; flex-direction: column; max-width: 72%; min-height: 40px; margin-top: 6px; }
+    .chat-line {
+      margin: 5px 0; padding: 7px 12px; border-radius: 10px; max-width: 92%;
+      background: #fffdf7; border: 1px solid var(--line-soft);
+    }
+    .chat-line.me { background: rgba(47, 77, 107, .08); border-color: rgba(47, 77, 107, .25); margin-left: auto; }
+    .chat-line.ai { background: rgba(72, 102, 61, .06); border-color: rgba(72, 102, 61, .22); }
+    .chat-line .who { font-size: 11.5px; color: var(--ink-3); font-family: var(--mono); margin-bottom: 2px; }
+    .chat-line.busy { color: var(--ink-3); font-style: italic; background: var(--paper-deep); }
+
+    /* ---- 杂项 ---- */
+    .msg-meta { color: var(--ink-3); font-size: 12px; }
+    .empty { color: #a99e85; padding: 10px 8px; font-style: italic; }
+    #who { padding: 7px 10px; }
+    #loginBar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0; padding: 14px 0 18px; border-bottom: 1px solid var(--line-soft); }
+    #meInfo a { color: var(--vermilion); }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
   </style>
 </head>
 <body>
-  <h1>laoban 管理看板</h1>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span class="seal">账</span>老板驾驶舱<small>LAOBAN LEDGER</small></div>
+      <nav class="anchors">
+        <a href="#cockpit">驾驶舱</a><a href="#approvalSection">审批</a><a href="#perfSection">绩效</a>
+        <a href="#pointsSection">积分榜</a><a href="#financeSection">CFO 周报</a><a href="#plansSection">计划</a>
+        <a href="#orgSection">组织</a><a href="#employeesSection">花名册</a><a href="#chatSection">对话</a>
+      </nav>
+    </div>
+  </header>
+  <div class="wrap">
+    <div class="masthead">
+      <h1>经营台账</h1>
+      <div class="sub">像经营公司一样管理人类与 AI 员工 · 派单 / 执行 / 验收 / 记分 / 晋升</div>
+      <div class="ledger-no" id="ledgerClock"></div>
+    </div>
 
-  <h2>登录</h2>
-  <p id="loginBar">
-    <input id="loginId" placeholder="员工 id，如 emp-chen" />
-    <input id="loginPw" type="password" placeholder="口令" />
-    <button onclick="doLogin()">登录</button>
-    <span id="meInfo" class="msg-meta"></span>
-  </p>
+    <p id="loginBar">
+      <input id="loginId" placeholder="员工 id，如 emp-chen" />
+      <input id="loginPw" type="password" placeholder="口令" />
+      <button class="vermilion" onclick="doLogin()">登录</button>
+      <span id="meInfo" class="msg-meta"></span>
+    </p>
 
-  <h2>任务驾驶舱</h2>
-  <p id="opMsg" class="msg-meta"></p>
-  <p>
-    <input id="newTaskTitle" placeholder="新任务标题" style="width:22%" />
-    <input id="newTaskInstr" placeholder="任务说明（可选）" style="width:28%" />
-    <input id="newTaskDue" placeholder="截止（可选，2026-12-31 或 2026-12-31T18:00）" style="width:22%" />
-    <select id="newTaskHorizon" style="width:8%">
-      <option value="">周期</option>
-      <option value="day">日</option>
-      <option value="week">周</option>
-      <option value="month">月</option>
-      <option value="quarter">季</option>
-      <option value="half_year">半年</option>
-      <option value="year">年</option>
-    </select>
-    <button onclick="submitTask()">提交任务</button>
-  </p>
-  <p id="assignRow">
-    <input id="assignId" placeholder="任务 id，如 T-abc123" />
-    <input id="assignTo" list="rosterIds" placeholder="派给谁（同事 id）" />
-    <datalist id="rosterIds"></datalist>
-    <button onclick="assignTask()">派发</button>
-  </p>
-  <p id="acceptRow">
-    <input id="acceptId" placeholder="任务 id（doing/reporting）" />
-    <select id="acceptScore">
-      <option value="5">5 优秀</option><option value="4" selected>4 良好</option>
-      <option value="3">3 合格</option><option value="2">2 待改</option>
-      <option value="1">1 驳回</option>
-    </select>
-    <input id="acceptComment" placeholder="验收意见（可选，会回写员工记忆）" style="width:30%" />
-    <button onclick="acceptTask()">验收</button>
-  </p>
+    <section class="sheet" id="cockpit">
+      <h2>任务驾驶舱<span class="hint">提交 → 派发 → 验收</span></h2>
+      <p id="opMsg" class="msg-meta"></p>
+      <p class="form-row">
+        <input id="newTaskTitle" placeholder="新任务标题" style="width:22%" />
+        <input id="newTaskInstr" placeholder="任务说明（可选）" style="width:28%" />
+        <input id="newTaskDue" placeholder="截止（可选，2026-12-31 或 2026-12-31T18:00）" style="width:22%" />
+        <select id="newTaskHorizon" style="width:8%">
+          <option value="">周期</option>
+          <option value="day">日</option>
+          <option value="week">周</option>
+          <option value="month">月</option>
+          <option value="quarter">季</option>
+          <option value="half_year">半年</option>
+          <option value="year">年</option>
+        </select>
+        <button class="vermilion" onclick="submitTask()">提交任务</button>
+      </p>
+      <p class="form-row" id="assignRow">
+        <input id="assignId" placeholder="任务 id，如 T-abc123" />
+        <input id="assignTo" list="rosterIds" placeholder="派给谁（同事 id）" />
+        <datalist id="rosterIds"></datalist>
+        <button onclick="assignTask()">派发</button>
+      </p>
+      <p class="form-row" id="acceptRow">
+        <input id="acceptId" placeholder="任务 id（doing/reporting）" />
+        <select id="acceptScore">
+          <option value="5">5 优秀</option><option value="4" selected>4 良好</option>
+          <option value="3">3 合格</option><option value="2">2 待改</option>
+          <option value="1">1 驳回</option>
+        </select>
+        <input id="acceptComment" placeholder="验收意见（可选，会回写员工记忆）" style="width:30%" />
+        <button class="vermilion" onclick="acceptTask()">验收</button>
+      </p>
+    </section>
 
-  <h2 id="approvalSection">审批队列</h2>
-  <table id="approvals"><thead><tr>
-    <th>ID</th><th>类型</th><th>风险</th><th>发起人</th><th>摘要</th><th>状态</th><th>操作</th>
-  </tr></thead><tbody></tbody></table>
+    <section class="sheet" id="approvalSection">
+      <h2>审批队列<span class="hint">高危放权 · 双轨招聘</span></h2>
+      <table id="approvals"><thead><tr>
+        <th>ID</th><th>类型</th><th>风险</th><th>发起人</th><th>摘要</th><th>状态</th><th>操作</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
 
-  <h2 id="headcountSection">编制申请（扩编/招聘）</h2>
-  <p id="hcFormRow">
-    <select id="hcType">
-      <option value="new_ai">新增 AI 员工</option>
-      <option value="clone_ai">复制现有 AI</option>
-      <option value="hire_human">招聘人类员工</option>
-    </select>
-    <input id="hcRole" placeholder="岗位 id（命中 org.json 模板则套用）" style="width:18%" />
-    <input id="hcDept" placeholder="部门" style="width:8%" />
-    <input id="hcSource" placeholder="复制源员工 id（仅复制时）" style="width:14%" />
-    <input id="hcCount" type="number" value="1" min="1" style="width:5%" />
-    <input id="hcReason" placeholder="申请理由（必填）" style="width:30%" />
-    <button onclick="submitHeadcount()">提交申请</button>
-  </p>
-  <table id="headcount"><thead><tr>
-    <th>ID</th><th>类型</th><th>岗位/来源</th><th>人数</th><th>发起人</th><th>理由</th><th>状态</th><th>操作</th>
-  </tr></thead><tbody></tbody></table>
+    <section class="sheet" id="headcountSection">
+      <h2>编制申请<span class="hint">扩编 / 招聘</span></h2>
+      <p class="form-row" id="hcFormRow">
+        <select id="hcType">
+          <option value="new_ai">新增 AI 员工</option>
+          <option value="clone_ai">复制现有 AI</option>
+          <option value="hire_human">招聘人类员工</option>
+        </select>
+        <input id="hcRole" placeholder="岗位 id（命中 org.json 模板则套用）" style="width:18%" />
+        <input id="hcDept" placeholder="部门" style="width:8%" />
+        <input id="hcSource" placeholder="复制源员工 id（仅复制时）" style="width:14%" />
+        <input id="hcCount" type="number" value="1" min="1" style="width:5%" />
+        <input id="hcReason" placeholder="申请理由（必填）" style="width:30%" />
+        <button onclick="submitHeadcount()">提交申请</button>
+      </p>
+      <table id="headcount"><thead><tr>
+        <th>ID</th><th>类型</th><th>岗位/来源</th><th>人数</th><th>发起人</th><th>理由</th><th>状态</th><th>操作</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
 
-  <h2 id="perfSection">绩效面板</h2>
-  <table id="perf"><thead><tr>
-    <th>员工</th><th>完成数</th><th>总成本</th><th>平均耗时</th><th>驳回率</th><th>人类介入率</th><th>平均评分</th><th>按时完成率</th>
-  </tr></thead><tbody></tbody></table>
+    <section class="sheet" id="perfSection">
+      <h2>绩效面板<span class="hint">验收后记账</span></h2>
+      <table id="perf"><thead><tr>
+        <th>员工</th><th>完成数</th><th>总成本</th><th>平均耗时</th><th>驳回率</th><th>人类介入率</th><th>平均评分</th><th>按时完成率</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
 
-  <h2 id="pointsSection">奖励积分榜（人类/AI 分榜 · ROI 统一对比）</h2>
-  <p id="ptsSummary" style="margin:4px 0 8px;font-weight:600"></p>
-  <div style="display:flex;gap:24px;flex-wrap:wrap">
-    <table id="ptsHuman"><thead><tr>
-      <th>人类员工</th><th>部门</th><th>积分</th><th>完成数</th><th>驳回</th><th>平均评分</th><th>按时完成率</th><th>累计成本(元)</th>
-    </tr></thead><tbody></tbody></table>
-    <table id="ptsAI"><thead><tr>
-      <th>AI 员工</th><th>部门</th><th>积分</th><th>完成数</th><th>驳回</th><th>平均评分</th><th>按时完成率</th><th>累计成本(元)</th>
-    </tr></thead><tbody></tbody></table>
+    <section class="sheet" id="pointsSection">
+      <h2>奖励积分榜<span class="hint">人类 / AI 分榜 · ROI 统一对比</span></h2>
+      <p id="ptsSummary"></p>
+      <div class="boards">
+        <div>
+          <div class="board-title">人类员工</div>
+          <table id="ptsHuman"><thead><tr>
+            <th>人类员工</th><th>部门</th><th>积分</th><th>完成数</th><th>驳回</th><th>平均评分</th><th>按时完成率</th><th>累计成本(元)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+        <div>
+          <div class="board-title">AI 员工</div>
+          <table id="ptsAI"><thead><tr>
+            <th>AI 员工</th><th>部门</th><th>积分</th><th>完成数</th><th>驳回</th><th>平均评分</th><th>按时完成率</th><th>累计成本(元)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <table id="ptsROI"><thead><tr>
+        <th>ROI 统一榜</th><th>族群</th><th>积分</th><th>累计成本(元)</th><th>每元成本产出积分</th>
+      </tr></thead><tbody></tbody></table>
+      <p id="ptsRules" class="empty" style="margin:4px 0 0"></p>
+    </section>
+
+    <section class="sheet" id="financeSection">
+      <h2>CFO 周报<span class="hint">成本 / 积分 / ROI · 按周归档</span></h2>
+      <div id="finCard" class="empty" style="margin:4px 0 0">加载中…</div>
+    </section>
+
+    <section class="sheet" id="reportSection">
+      <h2>复盘报告<span class="hint">按部门</span></h2>
+      <table id="report"><thead><tr>
+        <th>部门</th><th>完成数</th><th>驳回次数</th><th>教训数</th><th>自动复盘</th><th>成员明细</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="orgSection">
+      <h2>组织架构</h2>
+      <div id="org"></div>
+    </section>
+
+    <section class="sheet" id="tasksSection">
+      <h2>任务台账</h2>
+      <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="plansSection">
+      <h2>我的任务计划<span class="hint">日 / 周 / 月 / 季 / 半年 / 年</span></h2>
+      <p id="plansScope"></p>
+      <p class="form-row">
+        <input id="plansWho" list="rosterIds" placeholder="查谁的计划（员工 id，空 = 按权限汇总）" style="width:28%" />
+        <button onclick="loadPlans()">查看</button>
+        <span class="msg-meta">含被动分配与个人计划，按周期分组，显示完成情况</span>
+      </p>
+      <div id="plansBoard"></div>
+    </section>
+
+    <section class="sheet" id="employeesSection">
+      <h2>员工花名册</h2>
+      <table id="employees"><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>部门</th><th>状态</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="chatSection">
+      <h2>与 AI 员工对话</h2>
+      <p class="form-row">
+        <input id="chatFrom" placeholder="我的员工 id，如 emp-chen" />
+        <input id="chatTo" list="aiEmployees" placeholder="同事 id，如 dev（可下拉选择）" style="width:240px" />
+        <datalist id="aiEmployees"></datalist>
+        <button onclick="loadChatHistory()">载入历史消息</button>
+      </p>
+      <p class="form-row" style="align-items:flex-start">
+        <textarea id="chatContent" rows="2" style="width:56%" placeholder="输入消息，Enter 发送（Shift+Enter 换行）"></textarea>
+        <button class="vermilion" onclick="sendChat()">发送</button>
+      </p>
+      <div id="chatLog"></div>
+    </section>
+
+    <section class="sheet" id="msgSection">
+      <h2>点对点消息</h2>
+      <p class="form-row">
+        <input id="msgWho" placeholder="员工 id，如 dev" />
+        <button onclick="loadMessages()">查看收发件箱</button>
+      </p>
+      <table id="msgInbox"><thead><tr><th>ID</th><th>发件人 → 收件人</th><th>内容</th></tr></thead><tbody></tbody></table>
+      <table id="msgSent"><thead><tr><th>ID</th><th>发件人 → 收件人</th><th>内容</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="queueSection">
+      <h2>工位任务队列</h2>
+      <p class="form-row">
+        <input id="queueWho" placeholder="员工 id，如 dev" />
+        <button onclick="loadQueue()">查看队列</button>
+      </p>
+      <table id="queueTasks"><thead><tr><th>任务 ID</th><th>标题</th><th>状态</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="humanSection">
+      <h2>人类员工当日任务清单</h2>
+      <p class="form-row">
+        <input id="who" placeholder="员工 id，如 emp-陈工" />
+        <button onclick="loadHumanTasks()">查看今日清单</button>
+        <button onclick="loadHumanResults()">查看回传结果</button>
+      </p>
+      <table id="humanTasks"><thead><tr><th>ID</th><th>标题</th><th>来源</th><th>截止</th><th>状态</th></tr></thead><tbody></tbody></table>
+      <table id="humanResults"><thead><tr><th>ID</th><th>标题</th><th>承接人</th><th>回传结果</th></tr></thead><tbody></tbody></table>
+    </section>
   </div>
-  <table id="ptsROI"><thead><tr>
-    <th>ROI 统一榜</th><th>族群</th><th>积分</th><th>累计成本(元)</th><th>每元成本产出积分</th>
-  </tr></thead><tbody></tbody></table>
-  <p id="ptsRules" class="empty" style="margin:4px 0 0"></p>
-
-  <h2 id="financeSection">CFO 周报（成本 / 积分 / ROI · 按周归档）</h2>
-  <div id="finCard" class="empty" style="margin:4px 0 0">加载中…</div>
-
-  <h2 id="reportSection">复盘报告（按部门）</h2>
-  <table id="report"><thead><tr>
-    <th>部门</th><th>完成数</th><th>驳回次数</th><th>教训数</th><th>自动复盘</th><th>成员明细</th>
-  </tr></thead><tbody></tbody></table>
-
-  <h2>组织架构</h2>
-  <div id="org"></div>
-
-  <h2>任务</h2>
-  <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th></tr></thead><tbody></tbody></table>
-
-  <h2 id="plansSection">我的任务计划（日 / 周 / 月 / 季 / 半年 / 年）</h2>
-  <p id="plansScope" style="margin:4px 0 8px;font-weight:600"></p>
-  <p style="margin:4px 0">
-    <input id="plansWho" list="rosterIds" placeholder="查谁的计划（员工 id，空 = 按权限汇总）" style="width:28%" />
-    <button onclick="loadPlans()">查看</button>
-    <span class="msg-meta" style="margin-left:8px">含被动分配与个人计划，按周期分组，显示完成情况</span>
-  </p>
-  <div id="plansBoard"></div>
-
-  <h2>员工花名册</h2>
-  <table id="employees"><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>部门</th><th>状态</th></tr></thead><tbody></tbody></table>
-
-  <h2>与 AI 员工对话</h2>
-  <p>
-    <input id="chatFrom" placeholder="我的员工 id，如 emp-chen" />
-    <input id="chatTo" list="aiEmployees" placeholder="同事 id，如 dev（可下拉选择）" />
-    <datalist id="aiEmployees"></datalist>
-    <button onclick="loadChatHistory()">载入历史消息</button>
-  </p>
-  <p>
-    <textarea id="chatContent" rows="2" style="width:60%" placeholder="输入消息，Enter 发送（Shift+Enter 换行）"></textarea>
-    <button onclick="sendChat()">发送</button>
-  </p>
-  <div id="chatLog" style="max-width:70%; min-height:40px"></div>
-
-  <h2>点对点消息</h2>
-  <p>
-    <input id="msgWho" placeholder="员工 id，如 dev" />
-    <button onclick="loadMessages()">查看收发件箱</button>
-  </p>
-  <table id="msgInbox"><thead><tr><th>ID</th><th>发件人 → 收件人</th><th>内容</th></tr></thead><tbody></tbody></table>
-  <table id="msgSent"><thead><tr><th>ID</th><th>发件人 → 收件人</th><th>内容</th></tr></thead><tbody></tbody></table>
-
-  <h2>工位任务队列</h2>
-  <p>
-    <input id="queueWho" placeholder="员工 id，如 dev" />
-    <button onclick="loadQueue()">查看队列</button>
-  </p>
-  <table id="queueTasks"><thead><tr><th>任务 ID</th><th>标题</th><th>状态</th></tr></thead><tbody></tbody></table>
-
-  <h2>人类员工当日任务清单</h2>
-  <p>
-    <input id="who" placeholder="员工 id，如 emp-陈工" />
-    <button onclick="loadHumanTasks()">查看今日清单</button>
-    <button onclick="loadHumanResults()">查看回传结果</button>
-  </p>
-  <table id="humanTasks"><thead><tr><th>ID</th><th>标题</th><th>来源</th><th>截止</th><th>状态</th></tr></thead><tbody></tbody></table>
-  <table id="humanResults"><thead><tr><th>ID</th><th>标题</th><th>承接人</th><th>回传结果</th></tr></thead><tbody></tbody></table>
 
   <script>
     const SRC_LABEL = { ai_delegated: 'AI 派发', self: '自建', boss: '老板指派' };
@@ -202,22 +430,24 @@
     const HORIZON_LABELS = {day:'日', week:'周', month:'月', quarter:'季', half_year:'半年', year:'年', '':'—'};
 
     async function load() {
-      const ts = await (await fetch('/api/tasks')).json();
-      document.querySelector('#tasks tbody').innerHTML = ts.map(t =>
+      // 未登录时接口返回 401 JSON 对象（非数组），需防御避免 .map 崩溃
+      const ts = await (await fetch('/api/tasks')).json().catch(() => []);
+      document.querySelector('#tasks tbody').innerHTML = (Array.isArray(ts) ? ts : []).map(t =>
         `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td><td>${esc(t.state)}</td>` +
         `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}</td>` +
         `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td></tr>`).join('');
-      const es = await (await fetch('/api/employees')).json();
-      document.querySelector('#employees tbody').innerHTML = es.map(e =>
+      const es = await (await fetch('/api/employees')).json().catch(() => []);
+      const roster = Array.isArray(es) ? es : [];
+      document.querySelector('#employees tbody').innerHTML = roster.map(e =>
         `<tr><td>${esc(e.id)}</td><td>${kindBadge(e.kind)}</td>` +
         `<td>${esc(e.name)}</td><td>${esc(e.title)}</td><td>${esc(e.department)}</td>` +
         `<td>${statusBadge(e.status)}</td></tr>`).join('');
       // 聊天目标下拉：AI 员工（含状态，便于挑在岗的）
-      document.getElementById('aiEmployees').innerHTML = es.filter(e =>
+      document.getElementById('aiEmployees').innerHTML = roster.filter(e =>
         e.kind === 'ai').map(e =>
         `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.title || 'AI 员工')}（${esc(STATUS_LABEL[e.status] || e.status)}）</option>`).join('');
       // 派单目标下拉：全员
-      document.getElementById('rosterIds').innerHTML = es.map(e =>
+      document.getElementById('rosterIds').innerHTML = roster.map(e =>
         `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.title || '')}（${esc(STATUS_LABEL[e.status] || e.status)}）</option>`).join('');
       await loadOrg();
       await loadMe();
@@ -292,8 +522,8 @@
     function opFeedback(ok, data, status) {
       const el = document.getElementById('opMsg');
       el.textContent = ok ? (data.message || '操作成功')
-                          : `⚠️ ${data.error || ('HTTP ' + status)}`;
-      el.style.color = ok ? '#2a7a2a' : '#b33';
+                          : `批注：${data.error || ('HTTP ' + status)}`;
+      el.style.color = ok ? 'var(--moss)' : 'var(--vermilion)';
       if (ok) { load(); loadApprovals(); loadPerf(); loadPoints(); loadPlans(); }
     }
 
@@ -346,13 +576,13 @@
       // 晋升申请提示：连续验收通过 → 自动申请升自主等级，去审批队列决策
       if (ok && data.promotion) {
         const el = document.getElementById('opMsg');
-        el.textContent += `\n📈 晋升申请已自动提交：${data.promotion.summary}（见审批队列）`;
-        el.style.color = '#2a7a2a';
+        el.textContent += `\n晋升申请已自动提交：${data.promotion.summary}（见审批队列）`;
+        el.style.color = 'var(--moss)';
       }
       // 积分入账提示：统一记分，看积分榜横向对比
       if (ok && data.points !== null && data.points !== undefined) {
         const el = document.getElementById('opMsg');
-        el.textContent += `\n💰 ${data.assignee} 当前累计积分：${data.points}（见奖励积分榜）`;
+        el.textContent += `\n积分入账：${data.assignee} 当前累计积分 ${data.points}（见奖励积分榜）`;
       }
     }
 
@@ -480,7 +710,7 @@
         const s = board.summary;
         const roiText = s.roi === null ? '—（暂无成本数据）' : fmtPts(s.roi);
         document.getElementById('ptsSummary').textContent =
-          `📊 财务速览（${s.scope}）：累计积分 ${fmtPts(s.total_points)} · ` +
+          `财务速览（${s.scope}）：累计积分 ${fmtPts(s.total_points)} · ` +
           `累计成本 ${money(s.total_cost)} 元 · 每元成本产出 ${roiText} 积分`;
       }
       document.getElementById('ptsRules').textContent =
@@ -524,7 +754,7 @@
         `<span class="msg-meta">${h.key}:积分${fmtPts(h.points)}/成本${money(h.cost)}/完成${h.completion_count}</span>`
       ).join('　');
       card.innerHTML =
-        `<p style="margin:4px 0"><b>📅 ${r.period.key}</b>` +
+        `<p style="margin:4px 0"><b>${r.period.key}</b>` +
         `<span class="msg-meta">（${r.period.start.slice(0, 10)} ~ ${r.period.end.slice(0, 10)} · ` +
         `由 ${esc(r.generated_by)} 生成）</span></p>` +
         `<p style="margin:4px 0;font-weight:600">积分 ${fmtPts(c.points)} · 成本 ${money(c.cost)} 元 · ` +
@@ -537,7 +767,7 @@
         (deptRows ? `<table><thead><tr>
           <th>部门</th><th>积分</th><th>成本(元)</th><th>ROI</th><th>完成</th><th>驳回</th><th>成员</th>
         </tr></thead><tbody>${deptRows}</tbody></table>` : '') +
-        `<p style="margin:8px 0 2px">💡 CFO 建议：${esc(r.budget_advice || '—')}</p>` +
+        `<p style="margin:8px 0 2px"><b>CFO 建议：</b>${esc(r.budget_advice || '—')}</p>` +
         (history ? `<p style="margin:2px 0">往期：${history}</p>` : '');
     }
 
@@ -553,7 +783,7 @@
       const pct = v => (v * 100).toFixed(0) + '%';
       const o = plans.overall;
       document.getElementById('plansScope').textContent =
-        `📋 计划汇总（${plans.scope}）：共 ${o.total} 项 · 完成 ${o.done}（完成率 ${o.total ? pct(o.completion_rate) : '—'}）` +
+        `计划汇总（${plans.scope}）：共 ${o.total} 项 · 完成 ${o.done}（完成率 ${o.total ? pct(o.completion_rate) : '—'}）` +
         ` · 按时 ${o.on_time} · 超时 ${o.late}`;
       const board = document.getElementById('plansBoard');
       if (!plans.horizons.length) {
@@ -751,6 +981,24 @@
         sendChat();
       }
     });
+
+    // 报头账历：日期 + 记账时刻（每 30s 对时一次）
+    function tickClock() {
+      const n = new Date();
+      const date = n.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+      const time = n.toTimeString().slice(0, 8);
+      document.getElementById('ledgerClock').innerHTML =
+        `第 ${isoWeek(n)} 周期<br>记账时刻 ${time} · ${date}`;
+    }
+    function isoWeek(d) {
+      const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+      const day = t.getUTCDay() || 7;
+      t.setUTCDate(t.getUTCDate() + 4 - day);
+      const y0 = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+      return Math.ceil(((t - y0) / 86400000 + 1) / 7);
+    }
+    tickClock();
+    setInterval(tickClock, 30000);
 
     load();
   </script>
