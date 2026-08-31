@@ -461,8 +461,18 @@ def main(argv: list[str] | None = None) -> int:
                     gw.register_provider(pid, real_llm)
             print(f"聊天已启用：provider = {provider}（AI 员工统一路由，支持人↔AI 对话）")
         else:
-            gw = None
-            print("未检测到 LLM Key（LAOBAN_MOONSHOT_API_KEY 等），聊天不可用，看板其余功能正常")
+            # 演示模式：无 LLM Key 也给 AI 员工挂 MockLLM，worker 照常自动执行
+            # （与 acceptance 命令的回退一致）——否则派单后 AI 任务永远卡在
+            # assigned 且无提示，首次体验者无从排查
+            from .llm.mock import MockLLM
+            for e in st.list_employees():
+                if e.kind != "ai":
+                    continue
+                pid = e.model_config.get("provider", "mock")
+                if pid not in gw.list_providers():
+                    gw.register_provider(pid, MockLLM())
+            print("演示模式（MockLLM）：未检测到 LLM Key，AI 员工按脚本自动执行"
+                  "——设置 LAOBAN_MOONSHOT_API_KEY 等环境变量可切换真实 LLM")
         # 飞书接入：事件回调 URL 填 http://<主机>:<端口>/api/im/webhook/feishu
         feishu_hook = None
         from .im.binding import Bindings
