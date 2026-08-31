@@ -70,13 +70,24 @@ class Runner:
         return system
 
     def run(self, employee: Employee, task: Task) -> str:
+        return self.run_with_usage(employee, task)[0]
+
+    def run_with_usage(self, employee: Employee, task: Task) -> tuple[str, int]:
+        """执行任务，返回（交付内容, 本次运行消耗的 token）。
+
+        token 按调用结算（每次 chat 的 resp.usage_tokens 即时归属本次
+        运行），不读网关全局累计——多名员工共用同一 provider 时各算
+        各的，不串账。
+        """
         messages = [
             Message(role="system", content=self._system(employee)),
             Message(role="user", content=self._user(task)),
         ]
         actions: list[str] = []   # 协作动作审计记录
+        usage = 0                 # 本次运行累计 token（含工具回传续跑轮次）
 
         resp = self.gateway.chat_for_employee(employee.model_config, messages)
+        usage += getattr(resp, "usage_tokens", 0)
         content = resp.content
 
         rounds = 0
@@ -104,12 +115,13 @@ class Runner:
                 "\n\n请基于以上结果继续；如仍需协作可再次调用工具；"
                 "若任务已完成，直接输出最终交付（纯文本，无工具块）。")))
             resp = self.gateway.chat_for_employee(employee.model_config, messages)
+            usage += getattr(resp, "usage_tokens", 0)
             content = resp.content
             rounds += 1
 
         if actions:
             content += "\n\n[协作动作]\n" + "\n".join(f"- {a}" for a in actions)
-        return content
+        return content, usage
 
     @staticmethod
     def _user(task: Task) -> str:

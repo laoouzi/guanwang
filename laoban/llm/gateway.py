@@ -15,7 +15,6 @@ class LLMGateway:
 
     def __init__(self):
         self._providers: dict[str, Any] = {}
-        self._usage: dict[str, int] = {}    # provider → 累计 token（take_usage 清零取走）
 
     def register_mock(self, name: str, llm: MockLLM) -> None:
         self._providers[name] = llm
@@ -34,15 +33,7 @@ class LLMGateway:
     def chat(self, provider: str, messages: list[Message], tools: list[dict[str, Any]] | None = None) -> LLMResponse:
         if provider not in self._providers:
             raise KeyError(f"未注册的 provider: {provider}")
-        resp = self._providers[provider].chat(messages, tools)
-        self._usage[provider] = self._usage.get(provider, 0) + getattr(resp, "usage_tokens", 0)
-        return resp
-
-    def take_usage(self, provider: str) -> int:
-        """取走 provider 的累计 token 数（读后清零，供任务成本结算）。"""
-        n = self._usage.get(provider, 0)
-        self._usage[provider] = 0
-        return n
+        return self._providers[provider].chat(messages, tools)
 
     def chat_for_employee(self, model_config: dict[str, Any], messages: list[Message]) -> LLMResponse:
         return self.chat(model_config.get("provider", "mock"), messages)

@@ -33,6 +33,19 @@ class _FailingLLM:
         raise RuntimeError("LLM 服务不可用")
 
 
+class _MeteredLLM:
+    """按调用计 token 的假 provider：每次 chat 报固定 token 数。"""
+
+    def __init__(self, tokens_per_call: int = 100):
+        self.calls = 0
+        self.tokens = tokens_per_call
+
+    def chat(self, messages, tools=None):
+        from laoban.llm.base import LLMResponse
+        self.calls += 1
+        return LLMResponse(content=f"交付第 {self.calls} 次", usage_tokens=self.tokens)
+
+
 def _mk_store():
     st = JsonStore(tempfile.mkdtemp())
     st.save_employee(Employee(
@@ -181,6 +194,24 @@ class TestWorkerLoop(unittest.TestCase):
             time.sleep(0.05)
         loop.stop()
         self.assertEqual(st.load_task("T-3").state, REPORTING)
+
+    def test_token_usage_settled_per_call(self):
+        """token 按调用结算：共用 provider 的员工与旁路调用不串账。"""
+        from laoban.llm.base import Message
+        st = _mk_store()   # dev 与 dev2 共用 provider "dev"
+        _assign(st, "T-A")
+        _assign(st, "T-B", to="dev2")
+        gw = LLMGateway()
+        gw.register_provider("dev", _MeteredLLM(100))
+        # 旁路调用（模拟评审/复盘/chat 走同一 provider）：
+        # 旧「全局累计+读后清零」口径会把这 100 token 串进首个任务
+        gw.chat("dev", [Message(role="user", content="旁路调用")])
+        loop = WorkerLoop(st, gw)
+        loop.tick()
+        a = st.load_task("T-A").progress_log[-1]["usage_tokens"]
+        b = st.load_task("T-B").progress_log[-1]["usage_tokens"]
+        self.assertEqual(a, 100)   # 各算各的，只含自己那次运行
+        self.assertEqual(b, 100)
 
     def test_runner_with_store_collab_context(self):
         """Runner 带 store：AI 能看到通讯录与留言（不炸即可）。"""

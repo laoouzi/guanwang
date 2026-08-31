@@ -128,7 +128,7 @@ class WorkerLoop:
 
         started = time.time()
         try:
-            deliverable = self.runner.run(emp, task)
+            deliverable, usage = self.runner.run_with_usage(emp, task)
         except Exception as e:   # LLM/网络等一切执行失败 → blocked（终态可见）
             task.block_reason = f"自动执行失败：{e}"
             advance(task, BLOCKED, actor="worker",
@@ -142,9 +142,8 @@ class WorkerLoop:
             print(f"[worker] {task.id} 执行失败转 blocked：{e!r}")
             return summary
 
-        # 成本核算：token 用量（读后清零）× 员工单价 → 验收时入账
-        usage = self.gateway.take_usage(
-            emp.model_config.get("provider", "mock"))
+        # 成本核算：token 用量按本次运行结算（不读网关累计，共用
+        # provider 的员工各算各的，不串账）× 员工单价 → 验收时入账
         from ..core.points import accept_cost
         task.progress_log.append({
             "deliverable": deliverable,
