@@ -25,6 +25,19 @@ def _parse_ts(s: str) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _quality(comps: list[dict]) -> tuple[float, int, int, float | None]:
+    """完成条目的质量/时效指标：平均评分、按时数、限期数、按时率。
+
+    分母只含设了截止的任务（无限期不计入）；无评分记录时均分为 0。
+    """
+    scored = [c["score"] for c in comps if c.get("score")]
+    avg_score = (sum(scored) / len(scored)) if scored else 0.0
+    with_due = [c for c in comps if c.get("on_time") is not None]
+    on_time_count = sum(1 for c in with_due if c["on_time"])
+    on_time_rate = (on_time_count / len(with_due)) if with_due else None
+    return avg_score, on_time_count, len(with_due), on_time_rate
+
+
 class Ledger:
     """绩效账本：完成数 / 平均耗时 / 总成本 / 驳回率 / 人类介入率 / 奖励积分
     / 平均验收评分 / 按时完成率。条目带时间戳（at），支持周期过滤（周报用）。"""
@@ -46,9 +59,11 @@ class Ledger:
             "score": score, "on_time": on_time,
             "at": at or _now_iso(),
         })
+        self._persist()
 
     def record_rejection(self, emp_id: str) -> None:
         self._rejections[emp_id] += 1
+        self._persist()
 
     def record_points(self, emp_id: str, delta: float, reason: str = "",
                       kind: str = "", at: str = "") -> None:
@@ -60,6 +75,7 @@ class Ledger:
             "delta": delta, "reason": reason, "kind": kind,
             "at": at or _now_iso(),
         })
+        self._persist()
 
     def points(self, emp_id: str) -> float:
         return sum(p["delta"] for p in self._points.get(emp_id, []))
@@ -69,9 +85,15 @@ class Ledger:
 
     def record_step(self, emp_id: str) -> None:
         self._steps[emp_id] += 1
+        self._persist()
 
     def record_human_intervention(self, emp_id: str, kind: str) -> None:
         self._interventions[emp_id] += 1
+        self._persist()
+
+    def _persist(self) -> None:
+        """记账后钩子：内存版空操作；FileLedger 覆写为落盘。"""
+        pass
 
     def stats_between(self, emp_id: str, start: str, end: str) -> dict[str, Any]:
         """周期统计（财务周报用）：只统计 at ∈ [start, end] 的条目（含边界）。
@@ -89,11 +111,7 @@ class Ledger:
         comps = [c for c in self._completions.get(emp_id, []) if _in(c)]
         pts_entries = [p for p in self._points.get(emp_id, []) if _in(p)]
         total_cost = sum(c["cost"] for c in comps)
-        scored = [c["score"] for c in comps if c.get("score")]
-        avg_score = (sum(scored) / len(scored)) if scored else 0.0
-        with_due = [c for c in comps if c.get("on_time") is not None]
-        on_time_count = sum(1 for c in with_due if c["on_time"])
-        on_time_rate = (on_time_count / len(with_due)) if with_due else None
+        avg_score, on_time_count, due_count, on_time_rate = _quality(comps)
         points = sum(p["delta"] for p in pts_entries)
         rejections = sum(1 for p in pts_entries if p.get("kind") == "rejection")
         return {
@@ -101,7 +119,7 @@ class Ledger:
             "total_cost": total_cost,
             "avg_score": round(avg_score, 2),
             "on_time_count": on_time_count,
-            "due_count": len(with_due),
+            "due_count": due_count,
             "on_time_rate": (round(on_time_rate, 4)
                              if on_time_rate is not None else None),
             "points": round(points, 2),
@@ -119,13 +137,7 @@ class Ledger:
         steps = self._steps.get(emp_id, 0)
         interventions = self._interventions.get(emp_id, 0)
         intervention_rate = (interventions / steps) if steps else 0.0
-        # 质量维度：平均验收评分（只统计有评分记录的）
-        scored = [c["score"] for c in comps if c.get("score")]
-        avg_score = (sum(scored) / len(scored)) if scored else 0.0
-        # 时效维度：按时完成率（分母 = 有截止的任务数；无限期不计入）
-        with_due = [c for c in comps if c.get("on_time") is not None]
-        on_time_count = sum(1 for c in with_due if c["on_time"])
-        on_time_rate = (on_time_count / len(with_due)) if with_due else None
+        avg_score, on_time_count, due_count, on_time_rate = _quality(comps)
         return {
             "completion_count": len(comps),
             "total_cost": total_cost,
@@ -136,7 +148,7 @@ class Ledger:
             "points": self.points(emp_id),
             "avg_score": round(avg_score, 2),
             "on_time_count": on_time_count,
-            "due_count": len(with_due),
+            "due_count": due_count,
             "on_time_rate": (round(on_time_rate, 4)
                              if on_time_rate is not None else None),
         }
@@ -168,7 +180,8 @@ class FileLedger(Ledger):
         self._interventions = defaultdict(int, d.get("interventions", {}))
         self._points = defaultdict(list, {k: v for k, v in d.get("points", {}).items()})
 
-    def _save(self) -> None:
+    def _persist(self) -> None:
+        """每笔记账后原子写盘（由基类钩子调用）。"""
         d = {
             "completions": dict(self._completions),
             "rejections": dict(self._rejections),
@@ -180,30 +193,6 @@ class FileLedger(Ledger):
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self.path)
-
-    def record_completion(self, emp_id: str, task_id: str = "", cost: float = 0.0,
-                          elapsed: float = 0.0, score: float = 0.0,
-                          on_time: bool | None = None, at: str = "") -> None:
-        super().record_completion(emp_id, task_id, cost, elapsed,
-                                  score=score, on_time=on_time, at=at)
-        self._save()
-
-    def record_rejection(self, emp_id: str) -> None:
-        super().record_rejection(emp_id)
-        self._save()
-
-    def record_step(self, emp_id: str) -> None:
-        super().record_step(emp_id)
-        self._save()
-
-    def record_human_intervention(self, emp_id: str, kind: str) -> None:
-        super().record_human_intervention(emp_id, kind)
-        self._save()
-
-    def record_points(self, emp_id: str, delta: float, reason: str = "",
-                      kind: str = "", at: str = "") -> None:
-        super().record_points(emp_id, delta, reason, kind=kind, at=at)
-        self._save()
 
     def stats_all(self) -> dict[str, dict[str, Any]]:
         """全部有记录员工的统计（看板绩效面板用）。"""
