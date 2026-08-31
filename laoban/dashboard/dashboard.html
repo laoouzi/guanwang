@@ -199,6 +199,9 @@
       background: var(--vermilion); transform: translateY(-2px);
     }
     .tl-node.tl-head::before { background: var(--ink); }
+    /* 催办节点：琥珀点 + 朱砂动作词，与状态流转节点区分 */
+    .tl-node.tl-urge::before { background: var(--amber); }
+    .tl-node.tl-urge .tl-move { color: var(--vermilion); }
     .tl-at { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
              font-variant-numeric: tabular-nums; white-space: nowrap; }
     .tl-move { font-weight: 600; color: var(--ink); white-space: nowrap; }
@@ -217,7 +220,9 @@
 
     /* ---- 榜单 ---- */
     .boards { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
-    @media (max-width: 980px) { .boards { grid-template-columns: 1fr; } }
+    /* minmax(0,·)：轨宽不跟随表内容膨胀（grid 轨默认 auto 下限 = 内容宽），
+       宽表在手机上于各自卡内横滚，而非撑破 375 视口 */
+    @media (max-width: 980px) { .boards { grid-template-columns: minmax(0, 1fr); } }
     .board-title { font-family: var(--serif); font-size: 13.5px; color: var(--ink-2); letter-spacing: 2px; margin: 2px 0 6px; }
     #ptsSummary, #plansScope {
       margin: 0 0 10px; padding: 8px 14px; font-size: 13px; font-weight: 600;
@@ -255,6 +260,43 @@
     #batchHint a { color: var(--vermilion); }
     /* staff 无派单权：勾选列整列隐藏（表头 + 行首格） */
     #tasks.no-batch th:first-child, #tasks.no-batch td:first-child { display: none; }
+
+    /* ---- 手机版（≤720px）：单列布局 ----
+       宽表改「一表一滚动容器」横向滑动；表单纵排（输入占满行）；
+       输入字号 16px 防 iOS 聚焦自动放大；导航锚点横向滑条。 */
+    @media (max-width: 720px) {
+      html { scroll-padding-top: 92px; }
+      .wrap { padding: 0 14px 56px; }
+      .topbar-inner { padding: 8px 14px; gap: 6px 12px; }
+      .brand { font-size: 16px; }
+      .brand small { display: none; }
+      nav.anchors {
+        width: 100%; margin-left: 0; flex-wrap: nowrap;
+        overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+      }
+      nav.anchors::-webkit-scrollbar { display: none; }
+      nav.anchors a { flex: none; padding: 5px 8px; font-size: 12px; }
+      .masthead { flex-direction: column; align-items: flex-start; gap: 8px;
+                  padding: 18px 0 14px; }
+      .masthead h1 { font-size: 26px; letter-spacing: 3px; }
+      .masthead .ledger-no, .masthead #autoBar { text-align: left; padding-bottom: 0; }
+      section.sheet { padding: 14px 14px 16px; margin-top: 18px; }
+      section.sheet > h2 { margin: -14px -14px 14px; padding: 10px 14px 9px;
+                           font-size: 15.5px; letter-spacing: 1.5px; }
+      input, select, textarea { font-size: 16px; }
+      p.form-row { gap: 8px; }
+      p.form-row > input, p.form-row > select, p.form-row > textarea { width: 100% !important; }
+      p.form-row > button { width: auto !important; flex: 1 1 auto; padding: 10px 16px; }
+      #loginBar { flex-direction: column; align-items: stretch; }
+      #loginBar input { width: 100%; }
+      #loginBar button { width: 100%; padding: 10px 16px; }
+      table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      thead th, tbody td { white-space: nowrap; }
+      tr.tl-row > td { white-space: normal; }   /* 时间线行允许折行 */
+      #chatContent { width: 100% !important; }
+      #chatLog { max-width: 100%; }
+      .chat-line { max-width: 90%; }
+    }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -695,23 +737,36 @@
     }
 
     function timelineHtml(t) {
-      // 节点 = 提交（created_at）+ 每次状态流转（flow_log 有序追加）
-      const nodes = [{
-        at: t.created_at, from: '', to: t.state ? 'pending' : '',
-        actor: t.created_by, remark: `提交《${t.title}》`,
-      }].concat(t.flow_log || []);
+      // 节点 = 提交（created_at）+ 每次状态流转（flow_log）+ 每次催办（urge_log），
+      // 三类事件按时间合流：流转史与催办/升级史在同一条线上完整可追溯
+      const nodes = [{ at: t.created_at, kind: 'submit',
+                       actor: t.created_by, remark: `提交《${t.title}》` }]
+        .concat((t.flow_log || []).map(n => Object.assign({}, n, { kind: 'flow' })))
+        .concat((t.urge_log || []).map((n, i) =>
+          Object.assign({}, n, { kind: 'urge', seq: i + 1 })))
+        .sort((a, b) => (a.at || '').localeCompare(b.at || ''));
       const rows = nodes.map((n, i) => {
         const at = (n.at || '').slice(0, 16).replace('T', ' ');
-        const move = i === 0 ? '提交立项'
-          : `${STATE_LABEL[n.from] || n.from || '—'} → ${STATE_LABEL[n.to] || n.to}`;
+        let move = '', cls = 'tl-node', remark = n.remark || '';
+        const actor = n.kind === 'urge' ? n.by : n.actor;
+        if (n.kind === 'submit') {
+          move = '提交立项'; cls += ' tl-head';
+        } else if (n.kind === 'urge') {
+          move = `第 ${n.seq} 次催办`; cls += ' tl-urge';
+          remark = `由 ${n.by} 催 ${n.to}`
+            + (n.escalated_to ? `，升级抄送 ${n.escalated_to}` : '')
+            + (n.auto ? '（自动）' : '');
+        } else {
+          move = `${STATE_LABEL[n.from] || n.from || '—'} → ${STATE_LABEL[n.to] || n.to}`;
+        }
         // 停留时长：本节点距上一节点的时间差（卡在哪个环节一目了然）
         const prev = i > 0 ? nodes[i - 1].at : '';
         const dwell = i > 0 && prev && n.at
           ? dwellText(new Date(n.at) - new Date(prev)) : '';
-        return `<div class="tl-node${i === 0 ? ' tl-head' : ''}">` +
+        return `<div class="${cls}">` +
           `<span class="tl-at">${esc(at)}</span><span class="tl-move">${esc(move)}</span>` +
-          (n.actor ? `<span class="tl-actor">${esc(n.actor)}</span>` : '') +
-          (n.remark ? `<span class="tl-remark">${esc(n.remark)}</span>` : '') +
+          (actor ? `<span class="tl-actor">${esc(actor)}</span>` : '') +
+          (remark ? `<span class="tl-remark">${esc(remark)}</span>` : '') +
           (dwell ? `<span class="tl-dwell" title="上一环节到此停留">⏳${esc(dwell)}</span>` : '') +
           `</div>`;
       }).join('');

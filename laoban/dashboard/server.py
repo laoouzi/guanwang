@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -158,6 +160,213 @@ def _parse_dt(s: str) -> datetime.datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     return dt
+
+
+def _env_float(name: str, default: float) -> float:
+    """环境变量读 float（空/非法回退默认值）。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+class UrgeCenter:
+    """催办中枢：发催办信 + 未响应升级链 + IM 同步推送。
+
+    HTTP 手动催办（_Handler._op_urge）与后台自动催办（_AutoUrgeSweeper）
+    共用一套判定，两条路径的升级口径完全一致。
+    """
+
+    def __init__(self, store: JsonStore, feishu=None):
+        from ..im.binding import Bindings
+        self.store = store
+        self.feishu = feishu
+        self.bindings = Bindings(store.root)
+
+    def escalation_target(self, assignee_id: str, hops: int) -> str | None:
+        """沿 reports_to 链向上找第 hops 跳的上级（0 = 直属上级）。
+
+        断链（含指向不存在的员工）/ 循环（A→B→A）→ None；跳数超链长也返回 None。
+        """
+        seen = {assignee_id}
+        cur = assignee_id
+        for _ in range(max(0, hops) + 1):
+            emp = self.store.load_employee(cur)
+            if not emp:
+                return None
+            up = (emp.reports_to or "").strip()
+            if not up or up in seen:
+                return None
+            seen.add(up)
+            cur = up
+        return cur if self.store.load_employee(cur) else None
+
+    def im_push(self, employee_id: str, text: str) -> bool:
+        """催办/升级信同步推 IM：有绑定 + 渠道客户端才推，失败不影响站内信。"""
+        if self.feishu is None:
+            return False
+        im_user = self.bindings.lookup_by_employee("feishu", employee_id)
+        if not im_user:
+            return False
+        try:
+            self.feishu.send_text(im_user, text)
+            return True
+        except Exception as e:
+            print(f"[IM:feishu] 催办推送失败（{employee_id}）：{e!r}")
+            return False
+
+    def urge(self, task: Task, sender_id: str, now_dt, auto: bool = False) -> dict:
+        """对超期在飞任务发一次催办（含升级链判定与 IM 推送）。
+
+        站内信必达（失败抛 ValueError 由调用方兜底）；催办与升级记录落
+        task.urge_log（auto / im / im_up 标记来源与推送结果）。
+        """
+        from ..core.messenger import send
+        from ..core.permission import PermissionDenied
+
+        assignee = task.assignee
+        due = _parse_dt(task.due_at)
+        days = (now_dt - due).total_seconds() / 86400
+        overdue = f"{days:.0f} 天" if days >= 1 else f"{days * 24:.0f} 小时"
+        due_show = task.due_at[:16].replace("T", " ")
+        urge_count = len(task.urge_log) + 1
+        urge_text = (f"【催办】任务 {task.id}《{task.title}》已超期 {overdue}"
+                     f"（截止 {due_show}），请尽快交付或联系老板说明。")
+        try:
+            send(self.store, sender_id, assignee, urge_text, task_id=task.id)
+        except (ValueError, KeyError, PermissionDenied) as e:
+            raise ValueError(f"催办信发送失败：{e}")
+        im_ok = self.im_push(assignee, urge_text)
+
+        # ---- 升级链：连续未响应催办 → 沿 reports_to 逐级抄送 ----
+        # 窗口口径：第 i 次催办 → 第 i+1 次催办（最后一次 = 到现在），
+        # 承接人在窗口内 flow_log 无动作 = 该次催办未响应；
+        # 末尾连续未响应 N 次 → 本次升级到第 N-1 跳上级
+        # （N=1 → 直属上级；N=2 → 上级的上级……）。
+        escalated_to, escalate_note = "", ""
+        prior = task.urge_log
+        unresponsive = 0
+        if prior:
+            for i in range(len(prior) - 1, -1, -1):
+                u_at = prior[i].get("at", "")
+                nxt_at = prior[i + 1].get("at", "") if i + 1 < len(prior) else ""
+                acted = any(
+                    log.get("actor") == assignee and log.get("at", "") > u_at
+                    and (not nxt_at or log.get("at", "") <= nxt_at)
+                    for log in task.flow_log)
+                if acted:
+                    break
+                unresponsive += 1
+        esc_im_ok = False
+        if unresponsive >= 1:
+            target = self.escalation_target(assignee, unresponsive - 1)
+            if target is None:
+                escalate_note = (f"（已催 {urge_count} 次未响应，"
+                                 "承接人无上级可升级）")
+            elif target == sender_id:
+                escalated_to = target
+                escalate_note = (f"（第 {urge_count} 次催办未响应，"
+                                 "升级对象是你本人，无需抄送）")
+            else:
+                esc_text = (f"【催办升级】任务 {task.id}《{task.title}》"
+                            f"已催 {urge_count} 次未响应，超期 {overdue}，"
+                            f"承接人 {assignee}，请介入处理。")
+                try:
+                    send(self.store, sender_id, target, esc_text, task_id=task.id)
+                    escalated_to = target
+                    esc_im_ok = self.im_push(target, esc_text)
+                    escalate_note = f"（第 {urge_count} 次催办未响应，已抄送上级 {target}）"
+                except (ValueError, KeyError, PermissionDenied) as e:
+                    escalate_note = f"（升级信发送失败：{e}）"
+        elif prior:
+            escalate_note = "（承接人上次催办后有动作，本次不升级）"
+
+        entry = {"at": now_dt.isoformat(), "by": sender_id, "to": assignee,
+                 "escalated_to": escalated_to}
+        if auto:
+            entry["auto"] = True
+        if im_ok:
+            entry["im"] = True
+        if esc_im_ok:
+            entry["im_up"] = True
+        task.urge_log.append(entry)
+        self.store.save_task(task)
+        msg = f"已催办 {assignee}（第 {urge_count} 次，超期 {overdue}）{escalate_note}"
+        if im_ok:
+            msg += "（催办信已同步推送飞书）"
+        return {"id": task.id, "state": task.state, "assignee": assignee,
+                "urge_count": urge_count, "escalated_to": escalated_to or None,
+                "auto": auto, "im_pushed": im_ok, "message": msg}
+
+
+class _AutoUrgeSweeper(threading.Thread):
+    """后台自动催办：超期未响应 → 自动催 + 升级链（免老板手点）。
+
+    扫描口径：
+    - 在飞 + 有截止 + 已超期 ≥ after_hours（首次自动催的门槛）；
+    - 距上次催办（含手动）≥ cooldown_hours（防骚扰；手动催过也会重置冷却）；
+    - 升级链判定复用 UrgeCenter.urge：连续未响应逐级抄送上级。
+
+    环境变量：LAOBAN_AUTO_URGE=0 关闭；LAOBAN_AUTO_URGE_SEC 扫描间隔
+    （默认 900）；LAOBAN_AUTO_URGE_AFTER_HOURS 超期门槛（默认 24）；
+    LAOBAN_AUTO_URGE_COOLDOWN_HOURS 同任务催办冷却（默认 24）。
+    """
+
+    def __init__(self, center: UrgeCenter, interval_sec: float,
+                 after_hours: float, cooldown_hours: float):
+        super().__init__(daemon=True, name="laoban-auto-urge")
+        self.center = center
+        self.interval = max(1.0, float(interval_sec))
+        self.after_hours = float(after_hours)
+        self.cooldown = float(cooldown_hours)
+        self._stop_evt = threading.Event()
+
+    def run(self):
+        while not self._stop_evt.wait(self.interval):
+            try:
+                self.sweep()
+            except Exception as e:   # 后台线程永不死
+                print(f"[auto-urge] 扫描失败：{e!r}")
+
+    def stop(self):
+        self._stop_evt.set()
+
+    def sweep(self) -> list[dict]:
+        """立即执行一轮扫描（测试/运维可直调），返回本次自动催办结果。"""
+        from ..core.task import WAITING_HUMAN
+        now = datetime.datetime.now(datetime.timezone.utc)
+        emps = [e for e in self.center.store.list_employees()
+                if e.status == "active"]
+        boss = next((e for e in emps if e.permissions.get("role") == "admin"), None)
+        sender = boss or next((e for e in emps if e.kind == "human"), None)
+        if sender is None:
+            return []
+        out = []
+        for task in self.center.store.list_tasks():
+            if task.state not in {ASSIGNED, DOING, REPORTING, WAITING_HUMAN}:
+                continue
+            if not task.due_at or not task.assignee:
+                continue
+            due = _parse_dt(task.due_at)
+            if due is None or now <= due:
+                continue
+            if (now - due).total_seconds() / 3600 < self.after_hours:
+                continue
+            if task.urge_log:
+                last_at = _parse_dt(task.urge_log[-1].get("at", ""))
+                if last_at and (now - last_at).total_seconds() / 3600 < self.cooldown:
+                    continue
+            try:
+                r = self.center.urge(task, sender.id, now, auto=True)
+                out.append(r)
+                print(f"[auto-urge] {r['id']} → {r['assignee']}"
+                      f"（第 {r['urge_count']} 次）")
+            except Exception as e:
+                print(f"[auto-urge] {task.id} 催办失败：{e!r}")
+        return out
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -651,14 +860,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _op_urge(self, role: str, me, body: dict):
         """催办：超期在飞任务 → 站内信通知承接人（事前干预）。
 
-        升级链：催过但承接人始终未响应（上次催办后 flow_log 无其动作）
-        → 再次催办沿 reports_to 链逐级抄送上级（第 1 次升级给直属上级，
-        第 2 次给上级的上级……），催办记录落 task.urge_log 可追溯。
+        升级链 / IM 推送 / 催办落账见 UrgeCenter.urge；后台自动催办
+        （_AutoUrgeSweeper）走同一中枢，两条路径口径一致。
         """
         from ..core.task import WAITING_HUMAN
-        from ..core.messenger import send
-        from ..core.task import utcnow
-        from ..core.permission import PermissionDenied
 
         if role == rbac.STAFF:
             return self._error(403, "员工不可催办任务（找老板或部门负责人）")
@@ -693,88 +898,10 @@ class _Handler(BaseHTTPRequestHandler):
             if sender is None:
                 return self._error(409, "无在职员工可代发催办信")
             sender_id = sender.id
-        days = (now_dt - due).total_seconds() / 86400
-        overdue = f"{days:.0f} 天" if days >= 1 else f"{days * 24:.0f} 小时"
-        due_show = task.due_at[:16].replace("T", " ")
-        urge_count = len(task.urge_log) + 1
         try:
-            send(self.store, sender_id, assignee,
-                 f"【催办】任务 {task.id}《{task.title}》已超期 {overdue}"
-                 f"（截止 {due_show}），请尽快交付或联系老板说明。",
-                 task_id=task.id)
-        except (ValueError, KeyError, PermissionDenied) as e:
-            return self._error(409, f"催办信发送失败：{e}")
-
-        # ---- 升级链：连续未响应催办 → 沿 reports_to 逐级抄送 ----
-        # 窗口口径：第 i 次催办 → 第 i+1 次催办（最后一次 = 到现在），
-        # 承接人在窗口内 flow_log 无动作 = 该次催办未响应；
-        # 末尾连续未响应 N 次 → 本次升级到第 N-1 跳上级
-        # （N=1 → 直属上级；N=2 → 上级的上级……）。
-        escalated_to, escalate_note = "", ""
-        prior = task.urge_log
-        unresponsive = 0
-        if prior:
-            for i in range(len(prior) - 1, -1, -1):
-                u_at = prior[i].get("at", "")
-                nxt_at = prior[i + 1].get("at", "") if i + 1 < len(prior) else ""
-                acted = any(
-                    log.get("actor") == assignee and log.get("at", "") > u_at
-                    and (not nxt_at or log.get("at", "") <= nxt_at)
-                    for log in task.flow_log)
-                if acted:
-                    break
-                unresponsive += 1
-        if unresponsive >= 1:
-            target = self._escalation_target(assignee, unresponsive - 1)
-            if target is None:
-                escalate_note = (f"（已催 {urge_count} 次未响应，"
-                                 "承接人无上级可升级）")
-            elif target == sender_id:
-                escalated_to = target
-                escalate_note = (f"（第 {urge_count} 次催办未响应，"
-                                 "升级对象是你本人，无需抄送）")
-            else:
-                try:
-                    send(self.store, sender_id, target,
-                         f"【催办升级】任务 {task.id}《{task.title}》"
-                         f"已催 {urge_count} 次未响应，超期 {overdue}，"
-                         f"承接人 {assignee}，请介入处理。",
-                         task_id=task.id)
-                    escalated_to = target
-                    escalate_note = f"（第 {urge_count} 次催办未响应，已抄送上级 {target}）"
-                except (ValueError, KeyError, PermissionDenied) as e:
-                    escalate_note = f"（升级信发送失败：{e}）"
-        elif prior:
-            escalate_note = "（承接人上次催办后有动作，本次不升级）"
-        task.urge_log.append({
-            "at": utcnow(), "by": sender_id, "to": assignee,
-            "escalated_to": escalated_to,
-        })
-        self.store.save_task(task)
-        msg = f"已催办 {assignee}（第 {urge_count} 次，超期 {overdue}）{escalate_note}"
-        return self._json({"id": task.id, "state": task.state,
-                           "assignee": assignee,
-                           "urge_count": urge_count,
-                           "escalated_to": escalated_to or None,
-                           "message": msg})
-
-    def _escalation_target(self, assignee_id: str, hops: int) -> str | None:
-        """沿 reports_to 链向上找第 hops 跳的上级（0 = 直属上级）。
-
-        断链（含指向不存在的员工）/ 循环（A→B→A）→ None；跳数超链长也返回 None。
-        """
-        seen = {assignee_id}
-        cur = assignee_id
-        for _ in range(max(0, hops) + 1):
-            emp = self.store.load_employee(cur)
-            if not emp:
-                return None
-            up = (emp.reports_to or "").strip()
-            if not up or up in seen:
-                return None
-            seen.add(up)
-            cur = up
-        return cur if self.store.load_employee(cur) else None
+            return self._json(self.urge_center.urge(task, sender_id, now_dt))
+        except ValueError as e:
+            return self._error(409, str(e))
 
     def _op_report(self, role: str, me, body: dict):
         """人类员工汇报交付：ASSIGNED → DOING → REPORTING（等验收）。
@@ -1304,16 +1431,40 @@ class _Handler(BaseHTTPRequestHandler):
 class DashboardServer:
     def __init__(self, store: JsonStore, port: int = 7891, gateway=None,
                  feishu=None, auth=None):
+        center = UrgeCenter(store, feishu)
         handler = type("H", (_Handler,), {
             "store": store, "gateway": gateway, "feishu": feishu,
             "auth": auth, "sessions": {},
             "ledger": FileLedger(store),   # 持久化绩效账本（验收/审批记账）
+            "urge_center": center,         # 催办中枢（手动催与自动催共用）
         })
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
         self.port = self.httpd.server_address[1]
+        self.urge_center = center
+        self._serving = False
+        # 自动催办：随服务常驻（LAOBAN_AUTO_URGE=0 关闭；阈值/间隔/冷却可调）
+        self._sweeper = None
+        if os.environ.get("LAOBAN_AUTO_URGE", "1").strip() != "0":
+            self._sweeper = _AutoUrgeSweeper(
+                center,
+                interval_sec=max(5.0, _env_float("LAOBAN_AUTO_URGE_SEC", 900)),
+                after_hours=_env_float("LAOBAN_AUTO_URGE_AFTER_HOURS", 24),
+                cooldown_hours=_env_float("LAOBAN_AUTO_URGE_COOLDOWN_HOURS", 24))
+            self._sweeper.start()
 
     def serve_forever(self):
-        self.httpd.serve_forever()
+        self._serving = True
+        try:
+            self.httpd.serve_forever()
+        finally:
+            self._serving = False
 
     def shutdown(self):
-        self.httpd.shutdown()
+        """停服务：serve 过走 shutdown（等循环退出）；没 serve 过只关 socket
+        （BaseServer.shutdown 对未 serve 的实例会永久阻塞）。"""
+        if self._sweeper is not None:
+            self._sweeper.stop()
+        if self._serving:
+            self.httpd.shutdown()
+        else:
+            self.httpd.server_close()

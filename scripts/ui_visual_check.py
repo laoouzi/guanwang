@@ -110,10 +110,10 @@ def _check() -> int:
                 ok = False
 
         assert_("顶栏（墨条 + 印章品牌）", page.locator("header.topbar .brand").count() == 1)
-        assert_("锚点导航 9 项", page.locator("nav.anchors a").count() == 9)
+        assert_("锚点导航 10 项", page.locator("nav.anchors a").count() == 10)
         assert_("报头经营台账 + 账历时钟", page.locator(".masthead h1").inner_text() == "经营台账"
                 and "周期" in page.locator("#ledgerClock").inner_text())
-        assert_("账页卡 15 区", page.locator("section.sheet").count() == 15)
+        assert_("账页卡 17 区", page.locator("section.sheet").count() == 17)
         bg = page.evaluate("getComputedStyle(document.body).backgroundColor")
         assert_(f"纸色背景（实际 {bg}）", bg != "rgb(250, 250, 250)")
         assert_("表格账线（th 上下墨线）", page.evaluate(

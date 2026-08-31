@@ -835,23 +835,142 @@ class TestTimelineUrgeUnread(unittest.TestCase):
 
     def test_escalation_target_chain_safety(self):
         """升级目标：断链 / 悬空（指向不存在员工）/ 环（A→B→A）→ 不升级；跳数不超链长。"""
-        import types
-        from laoban.dashboard.server import _Handler
+        from laoban.dashboard.server import UrgeCenter
         st = self.store
         st.save_employee(Employee(id="cyc-a", name="甲", reports_to="cyc-b"))
         st.save_employee(Employee(id="cyc-b", name="乙", reports_to="cyc-a"))
         st.save_employee(Employee(id="orphan", name="孤儿", reports_to="ghost"))
-        f = _Handler._escalation_target   # 只依赖 self.store，借壳调用
-        h = types.SimpleNamespace(store=st)
-        self.assertEqual(f(h, "worker", 0), "mgr")   # 0 跳 = 直属上级
-        self.assertEqual(f(h, "worker", 1), "boss")  # 1 跳 = 上级的上级
-        self.assertIsNone(f(h, "worker", 2))         # 超链长
-        self.assertEqual(f(h, "cyc-a", 0), "cyc-b")  # 互指也只到一层（有界）
-        self.assertIsNone(f(h, "cyc-a", 1))          # 环 → 不再上溯
-        self.assertIsNone(f(h, "boss", 0))           # 断链（无上级）
-        self.assertIsNone(f(h, "orphan", 0))         # 悬空（上级不存在）
+        center = UrgeCenter(st)
+        self.assertEqual(center.escalation_target("worker", 0), "mgr")   # 0 跳 = 直属上级
+        self.assertEqual(center.escalation_target("worker", 1), "boss")  # 1 跳 = 上级的上级
+        self.assertIsNone(center.escalation_target("worker", 2))         # 超链长
+        self.assertEqual(center.escalation_target("cyc-a", 0), "cyc-b")  # 互指也只到一层（有界）
+        self.assertIsNone(center.escalation_target("cyc-a", 1))          # 环 → 不再上溯
+        self.assertIsNone(center.escalation_target("boss", 0))           # 断链（无上级）
+        self.assertIsNone(center.escalation_target("orphan", 0))         # 悬空（上级不存在）
 
-    # ---- #19 消息未读红点 ----
+    # ---- #21 自动催办（后台扫描：超期未响应 → 自动催 + 升级）----
+    def test_auto_urge_sweep_and_cooldown(self):
+        """自动催办：超期任务首轮自动催（auto 标记）；冷却内不重复；再催走升级链。"""
+        from laoban.dashboard.server import UrgeCenter, _AutoUrgeSweeper
+        from laoban.core.messenger import inbox
+        st = JsonStore(tempfile.mkdtemp())
+        boss = Employee(id="boss", name="老板", kind="human")
+        boss.permissions["role"] = "admin"
+        st.save_employee(boss)
+        st.save_employee(Employee(id="mgr", name="中干", kind="human",
+                                  department="dept", reports_to="boss"))
+        st.save_employee(Employee(id="worker", name="干活的", kind="human",
+                                  department="dept", reports_to="mgr"))
+        st.save_task(Task(id="T-AU", title="自动催办", due_at="2023-01-01"))
+        assign_task_auto(st, "T-AU", "worker", actor="boss")
+        st.save_task(Task(id="T-OK", title="未超期", due_at="2099-01-01"))
+        assign_task_auto(st, "T-OK", "worker", actor="boss")
+
+        center = UrgeCenter(st)
+        sw = _AutoUrgeSweeper(center, interval_sec=60,
+                              after_hours=0, cooldown_hours=24)
+        results = sw.sweep()
+        # 只催超期的：T-AU 一件；未超期 T-OK 不动
+        self.assertEqual([r["id"] for r in results], ["T-AU"])
+        self.assertTrue(results[0]["auto"])
+        t = st.load_task("T-AU")
+        self.assertEqual(len(t.urge_log), 1)
+        self.assertTrue(t.urge_log[0].get("auto"))    # 来源可追溯
+        self.assertEqual(t.urge_log[0]["by"], "boss")  # 发件人 = admin 代发
+        self.assertIn("催办", inbox(st, "worker")[0]["content"])
+        # 冷却内再扫：空手而归（手动/自动催过都重置冷却）
+        self.assertEqual(sw.sweep(), [])
+        # 冷却归零后连扫两轮：第 2 次催办升级抄送 mgr，第 3 次到 boss（代发人本人）
+        sw2 = _AutoUrgeSweeper(center, interval_sec=60,
+                               after_hours=0, cooldown_hours=0)
+        r2 = sw2.sweep()
+        self.assertEqual(r2[0]["escalated_to"], "mgr")
+        r3 = sw2.sweep()
+        self.assertEqual(r3[0]["escalated_to"], "boss")
+        hit = [m for m in inbox(st, "mgr") if "催办升级" in m["content"]]
+        self.assertEqual(len(hit), 1)
+        self.assertTrue(st.load_task("T-AU").urge_log[-1].get("auto"))
+
+    def test_auto_urge_env_disable(self):
+        """LAOBAN_AUTO_URGE=0：不启动后台扫描线程。"""
+        from unittest.mock import patch
+        st = _mk_free_store()
+        with patch.dict("os.environ", {"LAOBAN_AUTO_URGE": "0"}):
+            srv = DashboardServer(st, port=0)
+            try:
+                self.assertIsNone(srv._sweeper)
+            finally:
+                srv.shutdown()
+        # 默认（未设置）：启动且为守护线程（进程退出不残留）
+        srv2 = DashboardServer(_mk_free_store(), port=0)
+        try:
+            self.assertIsNotNone(srv2._sweeper)
+            self.assertTrue(srv2._sweeper.daemon)
+        finally:
+            srv2.shutdown()
+
+    # ---- #22 催办信 IM 推送（有绑定 → 站内信 + 飞书双通道）----
+    def test_urge_im_push(self):
+        """IM 联动：绑定员工收催办信同步推飞书；升级信推上级 IM；无绑定不影响。"""
+        from laoban.dashboard.server import UrgeCenter
+        from laoban.im.binding import Bindings
+        from laoban.core.messenger import inbox
+        import datetime as _dt
+
+        class _FakeFeishu:
+            def __init__(self): self.sent = []
+            def send_text(self, open_id, text): self.sent.append((open_id, text))
+
+        st = JsonStore(tempfile.mkdtemp())
+        boss = Employee(id="boss", name="老板", kind="human")
+        boss.permissions["role"] = "admin"
+        st.save_employee(boss)
+        st.save_employee(Employee(id="mgr", name="中干", kind="human",
+                                  department="dept", reports_to="boss"))
+        st.save_employee(Employee(id="worker", name="干活的", kind="human",
+                                  department="dept", reports_to="mgr"))
+        Bindings(st.root).bind("feishu", "ou-worker", "worker")
+        Bindings(st.root).bind("feishu", "ou-mgr", "mgr")
+        st.save_task(Task(id="T-IM", title="推送验证", due_at="2023-01-01"))
+        assign_task_auto(st, "T-IM", "worker", actor="boss")
+
+        fake = _FakeFeishu()
+        center = UrgeCenter(st, feishu=fake)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        r1 = center.urge(st.load_task("T-IM"), "boss", now)
+        self.assertTrue(r1["im_pushed"])
+        self.assertIn("已同步推送飞书", r1["message"])
+        self.assertEqual(len(fake.sent), 1)
+        self.assertEqual(fake.sent[0][0], "ou-worker")
+        self.assertIn("催办", fake.sent[0][1])
+        self.assertTrue(st.load_task("T-IM").urge_log[0].get("im"))
+        # 第 2 次未响应：催办信再推 worker IM + 升级信推上级 IM（共 3 推）
+        r2 = center.urge(st.load_task("T-IM"), "boss", now)
+        self.assertEqual(r2["escalated_to"], "mgr")
+        self.assertEqual([u for u, _ in fake.sent], ["ou-worker", "ou-worker", "ou-mgr"])
+        self.assertIn("催办升级", fake.sent[2][1])
+        self.assertTrue(st.load_task("T-IM").urge_log[1].get("im_up"))
+        # 站内信照常落库（IM 只是补充通道）
+        self.assertEqual(len(inbox(st, "worker")), 2)
+        # 无绑定员工：im_push 静默 False，站内信不受影响
+        self.assertFalse(center.im_push("boss", "测试"))
+
+    # ---- 前端挂载点 ----
+    def test_frontend_mounts_timeline_urge_and_mobile(self):
+        """页面源码包含：时间线催办节点合流渲染 + 手机版响应式样式。"""
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.server.port}/") as r:
+            html = r.read().decode()
+        # 时间线：urge_log 并入节点流（催办史与流转史同线可追溯）
+        self.assertIn("urge_log || []).map", html)
+        self.assertIn("tl-urge", html)
+        self.assertIn("升级抄送", html)
+        # 手机版：媒体查询 + 横滑表格 + 触控字号
+        self.assertIn("@media (max-width: 720px)", html)
+        self.assertIn("table { display: block; overflow-x: auto", html)
+        self.assertIn("font-size: 16px", html)
+
     def test_unread_count_and_mark_read(self):
         """红点口径：新信未读 → 查看全标已读（幂等）→ 新信再亮。"""
         from laoban.core.messenger import send, unread_count, mark_read, inbox
