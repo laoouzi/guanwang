@@ -30,6 +30,11 @@ def can_transition(
     to_state: str,
     max_review_rounds: int = MAX_REVIEW_ROUNDS,
 ) -> tuple[bool, str]:
+    # 死单复活：BLOCKED → ASSIGNED 重试（复用返工轮次上限，防无限重试）
+    if task.state == BLOCKED and to_state == ASSIGNED:
+        if task.review_round >= max_review_rounds:
+            return False, f"重试超限（最多 {max_review_rounds} 轮）"
+        return True, "死单复活（重试）"
     if task.state in TERMINAL_STATES:
         return False, f"终态 {task.state} 不可再流转"
     if to_state in {CANCELLED, BLOCKED}:
@@ -57,8 +62,10 @@ def advance(
     ok, reason = can_transition(task, to_state, max_review_rounds)
     if not ok:
         raise IllegalTransition(reason)
-    if (task.state == REVIEW and to_state == PLANNING) or \
-            (task.state == REPORTING and to_state == ASSIGNED):
+    if any((task.state, to_state) == pair for pair in (
+            (REVIEW, PLANNING),
+            (REPORTING, ASSIGNED),
+            (BLOCKED, ASSIGNED))):
         task.review_round += 1
     task.flow_log.append({
         "at": utcnow(),

@@ -47,6 +47,50 @@ class TestWorkstation(unittest.TestCase):
         with self.assertRaises(ValueError):
             enqueue(st, "dev", "T-1")
 
+    def test_concurrent_enqueue_loses_nothing(self):
+        """并发读改写不丢更新：看板多请求线程同时派单，任务一个不丢。
+
+        无锁的 load→改→save 后写覆盖先写（派单任务凭空消失）；
+        update_employee 锁内串行化后 8 线程并发全部落账。
+        """
+        import threading
+        st = _store_with_dev()
+        tids = [f"T-{i}" for i in range(8)]
+        threads = [threading.Thread(target=enqueue, args=(st, "dev", tid))
+                   for tid in tids]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        q = queue_of(st, "dev")
+        self.assertEqual(sorted(q), sorted(tids))   # 8 件全在，顺序不定
+
+    def test_concurrent_enqueue_and_dequeue(self):
+        """派单（入队）与验收（出队）并发：结果可解释，无凭空消失/复活。"""
+        import threading
+        st = _store_with_dev()
+        enqueue(st, "dev", "T-base")
+        errs = []
+
+        def _enq():
+            try:
+                enqueue(st, "dev", "T-new")
+            except Exception as e:
+                errs.append(e)
+
+        def _deq():
+            try:
+                dequeue(st, "dev", "T-base")
+            except Exception as e:
+                errs.append(e)
+
+        a = threading.Thread(target=_enq)
+        b = threading.Thread(target=_deq)
+        a.start(); b.start(); a.join(); b.join()
+        self.assertEqual(errs, [])
+        # 出队成功 + 新任务在（旧代码这里 T-new 会随机消失）
+        self.assertEqual(queue_of(st, "dev"), ["T-new"])
+
 
 class TestAssignTask(unittest.TestCase):
     def setUp(self):

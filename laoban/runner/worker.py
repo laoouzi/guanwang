@@ -8,8 +8,8 @@ WorkerLoop 每轮 tick：
 
 边界与失败处理：
 - 仅 AI 员工自动执行；人类员工的任务保持 assigned（走人类待办/线下完成）；
-- LLM 调用失败 → 任务转 blocked（终态，block_reason 落原因），老板看板上
-  可见并可重新派单（assign_task_auto 从 blocked 不行——终态。重新提交或人工处理）；
+- LLM 调用失败 → 任务转 blocked + 出队 + 站内信通知老板；老板可经
+  /api/task/retry 复活重跑（BLOCKED→ASSIGNED，重试轮次有上限）；
 - 幂等：非 assigned 状态（doing/reporting/…）跳过，重复 tick 无副作用。
 """
 from __future__ import annotations

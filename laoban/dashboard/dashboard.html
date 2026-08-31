@@ -159,6 +159,12 @@
     .status.suspended { color: var(--amber); background: rgba(154, 106, 26, .09); }
     .status.terminated { color: var(--vermilion); background: rgba(178, 58, 38, .08); text-decoration: line-through; }
     .queue-count { color: var(--indigo); background: rgba(47, 77, 107, .07); font-family: var(--mono); }
+    /* 待验收积压徽章：正常苔绿；超 48 时朱砂——验收黑洞一眼可见 */
+    .wait-badge {
+      font-family: var(--mono); font-size: 11px; color: var(--moss);
+      background: rgba(72, 102, 61, .08); border-radius: 999px; padding: 1px 7px;
+    }
+    .wait-badge.late { color: var(--vermilion); background: rgba(178, 58, 38, .1); font-weight: 600; }
     .src-ai_delegated { color: var(--indigo); }
     .src-self { color: var(--ink-2); }
     .src-boss { color: var(--vermilion); }
@@ -354,7 +360,7 @@
 
     <section class="sheet" id="tasksSection">
       <h2>任务台账</h2>
-      <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th></tr></thead><tbody></tbody></table>
+      <table id="tasks"><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th><th>操作</th></tr></thead><tbody></tbody></table>
     </section>
 
     <section class="sheet" id="plansSection">
@@ -433,14 +439,45 @@
     }
 
     const HORIZON_LABELS = {day:'日', week:'周', month:'月', quarter:'季', half_year:'半年', year:'年', '':'—'};
+    const STATE_LABEL = {pending:'待分拣', triage:'分拣中', planning:'规划中',
+                         review:'评审中', assigned:'已派发', doing:'执行中',
+                         waiting_human:'等人工', reporting:'待验收',
+                         done:'已完成', cancelled:'已取消', blocked:'已阻塞'};
+
+    // reporting 状态积压时长：交付后等老板验收的等待黑洞要看得见
+    function waitBadge(t) {
+      if (t.state !== 'reporting' || !t.updated_at) return '';
+      const hours = (Date.now() - new Date(t.updated_at).getTime()) / 3600000;
+      if (!isFinite(hours) || hours < 0) return '';
+      const txt = hours < 1 ? `${Math.max(1, Math.round(hours * 60))}分`
+                : hours < 48 ? `${Math.round(hours)}时`
+                : `${Math.round(hours / 24)}天`;
+      const cls = hours >= 48 ? 'wait-badge late' : 'wait-badge';
+      return ` <span class="${cls}" title="等验收时长（超 48 时标红）">⏱${txt}</span>`;
+    }
+
+    // 待验收积压计数：任务台账标题一眼看到交付黑洞
+    function backlogNote(ts) {
+      const n = ts.filter(t => t.state === 'reporting').length;
+      if (!n) return '';
+      const worst = Math.max(...ts.filter(t => t.state === 'reporting')
+        .map(t => (Date.now() - new Date(t.updated_at).getTime()) / 3600000));
+      const worstTxt = isFinite(worst) ? `，最老 ${Math.round(worst)} 时` : '';
+      return ` <span class="hint">待验收 ${n} 件${worstTxt}</span>`;
+    }
 
     async function load() {
       // 未登录时接口返回 401 JSON 对象（非数组），需防御避免 .map 崩溃
       const ts = await (await fetch('/api/tasks')).json().catch(() => []);
-      document.querySelector('#tasks tbody').innerHTML = (Array.isArray(ts) ? ts : []).map(t =>
-        `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td><td>${esc(t.state)}</td>` +
+      const tasks = Array.isArray(ts) ? ts : [];
+      document.querySelector('#tasksSection h2').innerHTML =
+        '任务台账' + backlogNote(tasks);
+      document.querySelector('#tasks tbody').innerHTML = tasks.map(t =>
+        `<tr><td>${esc(t.id)}</td><td>${esc(t.title)}</td>` +
+        `<td>${esc(STATE_LABEL[t.state] || t.state)}${waitBadge(t)}${t.block_reason ? ` <span class="hint" title="${esc(t.block_reason)}">ⓧ原因</span>` : ''}</td>` +
         `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}</td>` +
-        `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td></tr>`).join('');
+        `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td>` +
+        `<td>${t.state === 'blocked' ? `<button onclick="retryTask('${esc(t.id)}')">重新执行</button>` : '—'}</td></tr>`).join('');
       const es = await (await fetch('/api/employees')).json().catch(() => []);
       const roster = Array.isArray(es) ? es : [];
       document.querySelector('#employees tbody').innerHTML = roster.map(e =>
@@ -600,6 +637,11 @@
         document.getElementById('reportId').value = '';
         document.getElementById('reportText').value = '';
       }
+      opFeedback(ok, data, status);
+    }
+
+    async function retryTask(id) {
+      const { ok, data, status } = await opPost('/api/task/retry', { id });
       opFeedback(ok, data, status);
     }
 

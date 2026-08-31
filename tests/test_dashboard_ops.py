@@ -208,6 +208,41 @@ class TestOpsFreeAuth(unittest.TestCase):
                                      {"id": "X", "deliverable": "x"})
         self.assertEqual(status, 404)
 
+    def test_retry_revives_blocked_task(self):
+        """死单复活：blocked 任务一键重试，重入队列等 worker 再跑。"""
+        from laoban.core.workstation import queue_of
+        from laoban.core.task import DOING, BLOCKED as BLK
+        _, sub = self.client.post("/api/task/submit", {"title": "失败任务"})
+        tid = sub["id"]
+        self.client.post("/api/task/assign", {"id": tid, "to": "dev"})
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="dev")
+        advance(t, BLK, actor="worker", remark="自动执行失败：LLM 服务不可用")
+        t.block_reason = "自动执行失败：LLM 服务不可用"
+        self.store.save_task(t)
+        # worker 的 blocked 善后会出队——模拟之（retry 的 enqueue 幂等）
+        from laoban.core.workstation import dequeue
+        dequeue(self.store, "dev", tid)
+        status, body = self.client.post("/api/task/retry", {"id": tid})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["state"], "assigned")
+        self.assertIn("重试", body["message"])
+        # 重入队列 + 轮次计 1 + 阻塞原因清除
+        self.assertIn(tid, queue_of(self.store, "dev"))
+        t = self.store.load_task(tid)
+        self.assertEqual(t.review_round, 1)
+        self.assertEqual(t.block_reason, "")
+        # 复活后可再走执行流
+        advance(t, DOING, actor="dev")
+        self.store.save_task(t)
+
+    def test_retry_rejects_non_blocked(self):
+        _, sub = self.client.post("/api/task/submit", {"title": "未阻塞"})
+        status, body = self.client.post("/api/task/retry", {"id": sub["id"]})
+        self.assertEqual(status, 409)   # pending 不可重试
+        status, _ = self.client.post("/api/task/retry", {"id": "X"})
+        self.assertEqual(status, 404)
+
     def test_file_ledger_persists(self):
         """记账后新 server 实例（模拟重启）能读到旧账。"""
         # 本测试自证：先走一遍完整验收产生账目
@@ -259,6 +294,19 @@ class TestOpsRbac(unittest.TestCase):
         self.assertEqual(status, 403)
         # 员工可以提交
         self.assertEqual(sub["state"], "pending")
+
+    def test_staff_cannot_retry(self):
+        a = self._login("boss", "pw-boss")
+        _, sub = a.post("/api/task/submit", {"title": "要死的任务"})
+        tid = sub["id"]
+        a.post("/api/task/assign", {"id": tid, "to": "dev"})
+        t = self.store.load_task(tid)
+        advance(t, DOING, actor="dev")
+        advance(t, "blocked", actor="worker", remark="失败")
+        self.store.save_task(t)
+        c = self._login("emp-chen", "pw-chen")
+        status, _ = c.post("/api/task/retry", {"id": tid})
+        self.assertEqual(status, 403)
 
     def test_manager_assign_only_own_dept(self):
         m = self._login("mgr-dev", "pw-mgr")

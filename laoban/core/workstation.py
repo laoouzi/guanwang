@@ -7,28 +7,28 @@ from .task import Task, PENDING, TRIAGE, PLANNING, REVIEW, ASSIGNED
 
 
 def enqueue(store: JsonStore, emp_id: str, task_id: str) -> list[str]:
-    """任务入队员工工位（workspace.queue）。幂等：重复入队无副作用。"""
-    emp = store.load_employee(emp_id)
-    if not emp:
-        raise KeyError(f"员工不存在：{emp_id}")
-    if emp.status != "active":
-        raise ValueError(f"非在职员工不可承接任务（status={emp.status}）")
-    if task_id not in emp.workspace.get("queue", []):
-        emp.workspace.setdefault("queue", []).append(task_id)
-        store.save_employee(emp)
-    return emp.workspace["queue"]
+    """任务入队员工工位（workspace.queue）。幂等：重复入队无副作用。
+
+    原子读改写：并发派单/出队不丢更新。
+    """
+    def _add(emp):
+        if emp.status != "active":
+            raise ValueError(f"非在职员工不可承接任务（status={emp.status}）")
+        q = emp.workspace.setdefault("queue", [])
+        if task_id not in q:
+            q.append(task_id)
+        return list(q)
+    return store.update_employee(emp_id, _add)
 
 
 def dequeue(store: JsonStore, emp_id: str, task_id: str) -> list[str]:
     """任务出队（完成/转移时调用）。不存在的任务无操作。"""
-    emp = store.load_employee(emp_id)
-    if not emp:
-        raise KeyError(f"员工不存在：{emp_id}")
-    q = emp.workspace.get("queue", [])
-    if task_id in q:
-        q.remove(task_id)
-        store.save_employee(emp)
-    return q
+    def _remove(emp):
+        q = emp.workspace.get("queue", [])
+        if task_id in q:
+            q.remove(task_id)
+        return list(q)
+    return store.update_employee(emp_id, _remove)
 
 
 def queue_of(store: JsonStore, emp_id: str) -> list[str]:

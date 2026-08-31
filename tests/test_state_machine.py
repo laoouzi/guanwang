@@ -65,6 +65,33 @@ class TestStateMachine(unittest.TestCase):
         advance(t, DOING)
         self.assertEqual(t.state, DOING)
 
+    def test_blocked_retry_revives_to_assigned(self):
+        """死单复活：blocked → assigned 重试，计入轮次（复用上限防无限重试）。"""
+        t = Task(id="T-1", title="x", state=DOING)
+        advance(t, BLOCKED, actor="worker", remark="LLM 失败")
+        advance(t, ASSIGNED, actor="boss", remark="重试")
+        self.assertEqual(t.state, ASSIGNED)
+        self.assertEqual(t.review_round, 1)
+        # 复活后可重新走执行流
+        advance(t, DOING)
+        advance(t, REPORTING)
+
+    def test_blocked_retry_beyond_max_rounds(self):
+        t = Task(id="T-1", title="x", state=BLOCKED,
+                 review_round=MAX_REVIEW_ROUNDS)
+        ok, reason = can_transition(t, ASSIGNED)
+        self.assertFalse(ok)
+        self.assertIn("重试超限", reason)
+        with self.assertRaises(IllegalTransition):
+            advance(t, ASSIGNED)
+
+    def test_blocked_to_other_states_still_illegal(self):
+        """blocked 只能复活到 assigned：去 done/doing 仍然非法。"""
+        t = Task(id="T-1", title="x", state=BLOCKED)
+        for s in (DOING, REPORTING, DONE, PENDING):
+            with self.assertRaises(IllegalTransition):
+                advance(t, s)
+
 
 if __name__ == "__main__":
     unittest.main()

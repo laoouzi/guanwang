@@ -313,6 +313,7 @@ class _Handler(BaseHTTPRequestHandler):
         # ---- 任务操作 / 审批决策 / 编制申请（老板驾驶舱）----
         if u.path in ("/api/task/submit", "/api/task/assign",
                       "/api/task/accept", "/api/task/report",
+                      "/api/task/retry",
                       "/api/approval/decide",
                       "/api/headcount/submit", "/api/headcount/decide"):
             return self._handle_operation(u.path)
@@ -336,6 +337,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._op_accept(role, me, body)
             if path == "/api/task/report":
                 return self._op_report(role, me, body)
+            if path == "/api/task/retry":
+                return self._op_retry(role, me, body)
             if path == "/api/approval/decide":
                 return self._op_approve(role, me, body)
             if path == "/api/headcount/submit":
@@ -385,6 +388,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.ledger.record_step(to)
         return self._json({"id": task.id, "state": task.state,
                            "message": f"任务已派发给 {to}（已入工位队列）"})
+
+    def _learn(self, assignee: str, emp, task, score: int, comment: str):
+        """复盘并原子回写经验：LLM 在锁外算（避免长持锁），
+        锁内只把教训合并进最新员工对象（防并发派单被旧对象覆盖）。"""
+        exp = review_and_learn(self.store, emp, task,
+                               score=score, comment=comment,
+                               gateway=self.gateway)
+        if exp:
+            self.store.update_employee(
+                assignee,
+                lambda e: e.memory.setdefault("experiences", []).append(exp))
+        return exp
 
     def _op_accept(self, role: str, me, body: dict):
         """验收：DOING/REPORTING → DONE；低分且未超返工上限 → 驳回返工回炉。
@@ -448,10 +463,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # 返工：回队列等重做（幂等）+ 复盘教训 + 驳回扣分
                 enqueue(self.store, assignee, task_id)
                 if emp:
-                    review = review_and_learn(self.store, emp, task,
-                                              score=score, comment=comment,
-                                              gateway=self.gateway)
-                    self.store.save_employee(emp)
+                    review = self._learn(assignee, emp, task, score, comment)
                 self.ledger.record_rejection(assignee)
                 self.ledger.record_points(
                     assignee, -PENALTY_REJECTION,
@@ -459,16 +471,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self.ledger.record_step(assignee)
             else:
                 dequeue(self.store, assignee, task_id)
-                # 出队已落盘：重载承接人，防止把旧队列（含本任务）回写覆盖
-                if emp:
-                    emp = self.store.load_employee(assignee)
                 # 复盘回写：评语为空或低分时自动生成教训（有 LLM 走 AI 复盘，
                 # 否则模板降级），下次执行经 render_experience 注入生效
                 if emp:
-                    review = review_and_learn(self.store, emp, task,
-                                              score=score, comment=comment,
-                                              gateway=self.gateway)
-                    self.store.save_employee(emp)
+                    review = self._learn(assignee, emp, task, score, comment)
                 # 记账：完成（含交付落档的成本/耗时）+ 奖励积分
                 delivery = next((p for p in reversed(task.progress_log)
                                  if p.get("deliverable")), {})
@@ -517,6 +523,48 @@ class _Handler(BaseHTTPRequestHandler):
                            "review": review,
                            "promotion": promotion,
                            "points": self.ledger.points(assignee) if assignee else None})
+
+    def _op_retry(self, role: str, me, body: dict):
+        """死单复活：BLOCKED → ASSIGNED 重试（复用返工轮次上限）。
+
+        执行失败不等于任务作废：老板一键重试，任务重入承接人队列
+        由 worker 再跑（AI）或本人再做（人类）。超限任务彻底作废，
+        需重新提交。
+        """
+        from ..core.task import BLOCKED
+        if role == rbac.STAFF:
+            return self._error(403, "员工不可重试任务（找老板或部门负责人）")
+        task_id = str(body.get("id", "")).strip()
+        if not task_id:
+            return self._error(400, "缺少 id")
+        task = self.store.load_task(task_id)
+        if not task:
+            return self._error(404, f"任务不存在：{task_id}")
+        if task.state != BLOCKED:
+            return self._error(409, f"当前状态 {task.state} 不可重试（需 blocked）")
+        assignee = task.assignee
+        if not assignee:
+            return self._error(409, "任务未指派承接人，无法重试")
+        emp = self.store.load_employee(assignee)
+        if not emp:
+            return self._error(404, f"承接人不存在：{assignee}")
+        if emp.status != "active":
+            return self._error(409, f"承接人 {assignee} 非在职，先复工或改派他人")
+        if role == rbac.MANAGER and assignee not in rbac.dept_members(self.store, me):
+            return self._error(403, "只能重试本部门成员的任务")
+        actor = self._actor(me)
+        try:
+            advance(task, ASSIGNED, actor=actor,
+                    remark=f"死单复活（重试，原因已清）")
+        except IllegalTransition as e:
+            return self._error(409, str(e))
+        task.block_reason = ""
+        self.store.save_task(task)
+        enqueue(self.store, assignee, task_id)
+        return self._json({"id": task.id, "state": task.state,
+                           "assignee": assignee,
+                           "message": f"已重试：任务重入 {assignee} 队列"
+                                      f"（第 {task.review_round}/{MAX_REVIEW_ROUNDS} 轮）"})
 
     def _op_report(self, role: str, me, body: dict):
         """人类员工汇报交付：ASSIGNED → DOING → REPORTING（等验收）。

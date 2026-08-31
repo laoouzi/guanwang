@@ -161,6 +161,31 @@ class TestWorkerLoop(unittest.TestCase):
         self.assertTrue(any("T-F2" in m["content"] and "执行失败" in m["content"]
                             for m in box))
 
+    def test_blocked_task_reexecutes_after_retry(self):
+        """死单复活闭环：失败转 blocked → 复活回 assigned → worker 再跑成功。"""
+        st = _mk_store()
+        _assign(st, "T-RY")
+        gw = LLMGateway()
+        gw.register_provider("dev", _FailingLLM())
+        loop = WorkerLoop(st, gw)
+        loop.tick()
+        self.assertEqual(st.load_task("T-RY").state, "blocked")
+        # 老板重试：blocked → assigned（复用轮次）+ 重入队
+        t = st.load_task("T-RY")
+        advance(t, ASSIGNED, actor="boss", remark="重试")
+        t.block_reason = ""
+        st.save_task(t)
+        from laoban.core.workstation import enqueue
+        enqueue(st, "dev", "T-RY")
+        self.assertEqual(t.review_round, 1)
+        # 换回健康 provider，下一轮 tick 重跑成功
+        loop.gateway = _mk_gw()
+        loop.runner.gateway = loop.gateway
+        results = loop.tick()
+        self.assertEqual(results, [{"task_id": "T-RY", "employee": "dev",
+                                    "result": "reporting"}])
+        self.assertEqual(st.load_task("T-RY").state, REPORTING)
+
     def test_reworked_task_reexecutes(self):
         """驳回返工回炉的任务：回队列后 worker 再次自动执行。"""
         st = _mk_store()
