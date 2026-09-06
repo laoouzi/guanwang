@@ -216,13 +216,25 @@ class TestWebPush(unittest.TestCase):
             return None
 
     def test_vapid_generated_and_persisted(self):
-        from laoban.dashboard.webpush import WebPushManager
+        from laoban.dashboard.webpush import WebPushManager, _HAS_CRYPTO
+        if not _HAS_CRYPTO:
+            self.skipTest("需要 cryptography")
         st = _mk_store()
         m = WebPushManager(st)
         self.assertTrue(m.public_key)
         # 重建实例读到同一把公钥（长期复用，客户端订阅不失效）
         m2 = WebPushManager(st)
         self.assertEqual(m.public_key, m2.public_key)
+
+    def test_no_crypto_degrades_safely(self):
+        """缺加密库时：enabled=False、notify 不推送也不抛异常。"""
+        from laoban.dashboard import webpush as wp
+        st = _mk_store()
+        m = wp.WebPushManager(st)
+        if wp._HAS_CRYPTO:
+            self.skipTest("仅在缺 cryptography 时验证降级")
+        self.assertFalse(m.enabled)
+        self.assertEqual(m.notify("emp-chen", "t", "b"), 0)
 
     def test_subscribe_unsubscribe(self):
         from laoban.dashboard.webpush import WebPushManager

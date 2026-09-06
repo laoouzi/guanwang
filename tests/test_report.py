@@ -85,7 +85,9 @@ class TestReport(unittest.TestCase):
 
         fin = by_dept["fin_dept"]
         self.assertEqual(fin["lessons"], 0)      # fin 的经验是 success
-        self.assertEqual(fin["members"][0]["wins"], 1)
+        # 按工号取成员（members 顺序依赖文件系统 glob，不保证稳定）
+        fm = {x["id"]: x for x in fin["members"]}
+        self.assertEqual(fm["fin"]["wins"], 1)
 
     def test_manager_scoped_to_own_dept(self):
         status, rows = self.mgr.get("/api/report")
