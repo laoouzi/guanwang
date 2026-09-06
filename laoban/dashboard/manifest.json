@@ -1,0 +1,16 @@
+{
+  "name": "老板驾驶舱 · 经营台账",
+  "short_name": "老板账本",
+  "description": "AI 员工公司的经营看板：任务流转、催办升级、消息收发、组织绩效",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f4eedd",
+  "theme_color": "#231f1a",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,1822 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>laoban · 老板驾驶舱</title>
+  <!-- PWA：可安装到主屏（iOS Safari 用 apple-touch-icon，安卓/桌面走 manifest） -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#231f1a">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+  <link rel="apple-touch-icon" href="/icon-512.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="老板账本">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <style>
+    /* ============================================================
+       账房美学 Ledger & Ink —— 暖纸底 / 墨字 / 朱砂印章 / 账本横线
+       零外链字体（离线可用），数字一律 tabular-nums 便于看账。
+       ============================================================ */
+    :root {
+      --paper:      #f4efe4;   /* 案头纸 */
+      --paper-deep: #ece5d4;   /* 纸影 */
+      --card:       #faf7ef;   /* 账页卡 */
+      --ink:        #23201a;   /* 浓墨 */
+      --ink-2:      #5c5344;   /* 淡墨 */
+      --ink-3:      #8f8672;   /* 枯墨 */
+      --line:       #d9cfba;   /* 账线 */
+      --line-soft:  #e7dfcd;
+      --vermilion:  #b23a26;   /* 朱砂：主行动 */
+      --vermilion-ink: #8f2d1d;
+      --indigo:     #2f4d6b;   /* 靛青：AI */
+      --ochre:      #7d5a24;   /* 赭石：人类 */
+      --moss:       #48663d;   /* 苔绿：正向 / 金额 */
+      --amber:      #9a6a1a;   /* 琥珀：警示 */
+      --gold:       #8a6d1f;   /* 积分金 */
+      --shadow: 0 1px 2px rgba(60, 50, 30, .06), 0 6px 18px rgba(60, 50, 30, .07);
+      --serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", "SimSun", serif;
+      --sans:  "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+      --mono:  "JetBrains Mono", "SF Mono", "Cascadia Mono", "Menlo", "Consolas", monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+    body {
+      margin: 0; color: var(--ink); font-family: var(--sans);
+      font-size: 14px; line-height: 1.6;
+      background:
+        repeating-linear-gradient(0deg, transparent 0 27px, rgba(180,165,130,.055) 27px 28px),
+        var(--paper);
+    }
+    body::before {   /* 纸面噪点，营造纸纤维质感 */
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.045'/%3E%3C/svg%3E");
+    }
+    .wrap { position: relative; z-index: 1; max-width: 1240px; margin: 0 auto; padding: 0 28px 72px; }
+
+    /* ---- 顶栏：墨条 + 锚点导航 ---- */
+    header.topbar {
+      position: sticky; top: 0; z-index: 20;
+      background: var(--ink); color: #f0ead9;
+      border-bottom: 3px double var(--vermilion);
+    }
+    .topbar-inner {
+      max-width: 1240px; margin: 0 auto; padding: 10px 28px;
+      display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+    }
+    .brand { font-family: var(--serif); font-size: 19px; letter-spacing: 2px; white-space: nowrap; }
+    .brand .seal {
+      display: inline-grid; place-items: center; width: 26px; height: 26px;
+      margin-right: 9px; border: 1.5px solid var(--vermilion); border-radius: 50%;
+      color: #d96a52; font-size: 13px; font-family: var(--serif);
+      transform: rotate(-6deg); vertical-align: -6px;
+    }
+    .brand small { font-size: 12px; color: #b7ae97; letter-spacing: 3px; margin-left: 10px; font-family: var(--sans); }
+    nav.anchors { display: flex; gap: 2px; flex-wrap: wrap; margin-left: auto; }
+    nav.anchors a {
+      color: #cfc7b0; text-decoration: none; font-size: 12.5px;
+      padding: 3px 10px; border-radius: 3px; letter-spacing: 1px;
+    }
+    nav.anchors a:hover { color: #fff; background: rgba(255,255,255,.12); }
+    /* 未读红点：导航「对话」新信提示（朱砂印章色） */
+    .nav-dot {
+      display: none; min-width: 16px; height: 16px; padding: 0 4px;
+      margin-left: 5px; border-radius: 999px; vertical-align: 2px;
+      background: var(--vermilion); color: #fff;
+      font-size: 10.5px; font-family: var(--mono); line-height: 16px;
+      text-align: center; font-style: normal;
+    }
+    .nav-dot.on { display: inline-block; }
+
+    /* ---- 报头 ---- */
+    .masthead { display: flex; align-items: flex-end; gap: 18px; padding: 30px 0 18px; border-bottom: 2px solid var(--ink); }
+    .masthead h1 {
+      margin: 0; font-family: var(--serif); font-weight: 600;
+      font-size: 34px; letter-spacing: 6px; line-height: 1.15;
+    }
+    .masthead .sub { color: var(--ink-2); font-size: 13px; letter-spacing: 1px; padding-bottom: 6px; }
+    .masthead .ledger-no { margin-left: auto; text-align: right; color: var(--ink-3); font-family: var(--mono); font-size: 11.5px; line-height: 1.5; padding-bottom: 4px; }
+    .masthead #autoBar { margin: 0; padding-bottom: 4px; font-size: 11.5px; font-family: var(--mono); color: var(--ink-3); line-height: 1.5; text-align: right; }
+    .masthead #autoBar label { cursor: pointer; user-select: none; white-space: nowrap; }
+    .masthead #autoBar input { vertical-align: -1px; accent-color: var(--vermilion); }
+    .masthead #autoBar #autoMeta { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+    /* ---- 账页卡（section）---- */
+    section.sheet {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 6px; box-shadow: var(--shadow);
+      margin-top: 26px; padding: 20px 24px 22px;
+      animation: rise .5s ease both;
+    }
+    section.sheet:nth-of-type(1) { animation-delay: .05s; }
+    section.sheet:nth-of-type(2) { animation-delay: .10s; }
+    section.sheet:nth-of-type(3) { animation-delay: .15s; }
+    section.sheet:nth-of-type(4) { animation-delay: .20s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+    section.sheet > h2 {
+      margin: -20px -24px 18px; padding: 11px 24px 10px;
+      font-family: var(--serif); font-size: 17.5px; font-weight: 600; letter-spacing: 2.5px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #f2ecdd, #ede5d2);
+      border-radius: 5px 5px 0 0;
+      display: flex; align-items: baseline; gap: 10px;
+    }
+    section.sheet > h2::before {   /* 朱砂角标 */
+      content: ""; width: 7px; height: 7px; background: var(--vermilion);
+      transform: rotate(45deg) translateY(-1px); flex: none;
+    }
+    section.sheet > h2 .hint { font-family: var(--sans); font-weight: 400; font-size: 12px; color: var(--ink-3); letter-spacing: 0; margin-left: auto; }
+
+    /* ---- 账本表格：只有横线，无竖线无框 ---- */
+    table { border-collapse: collapse; width: 100%; margin: 4px 0 8px; font-variant-numeric: tabular-nums; }
+    thead th {
+      text-align: left; font-weight: 600; font-size: 12px; color: var(--ink-2);
+      letter-spacing: 1.5px; padding: 7px 10px 6px;
+      border-top: 2px solid var(--ink); border-bottom: 1px solid var(--ink);
+      background: transparent;
+    }
+    tbody td { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+    tbody tr:hover { background: rgba(178, 58, 38, .045); }
+    tbody tr:last-child td { border-bottom: 1px solid var(--line); }
+    td:first-child { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+
+    /* ---- 表单 ---- */
+    input, select, textarea {
+      font: inherit; color: var(--ink); background: #fffdf7;
+      border: 1px solid var(--line); border-radius: 4px;
+      padding: 7px 10px; width: 170px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none; border-color: var(--vermilion);
+      box-shadow: 0 0 0 3px rgba(178, 58, 38, .12);
+    }
+    input::placeholder, textarea::placeholder { color: #b3a98f; }
+    input:disabled { background: var(--paper-deep); color: var(--ink-3); }
+    textarea { width: 100%; }
+    p.form-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 12px; }
+
+    button {
+      font: inherit; cursor: pointer; border-radius: 4px;
+      border: 1px solid var(--ink); background: var(--ink); color: #f5f0e2;
+      padding: 7px 18px; letter-spacing: 1px;
+      transition: transform .06s, background .15s, box-shadow .15s;
+      box-shadow: 0 1px 0 rgba(0,0,0,.25);
+    }
+    button:hover { background: #3a342a; }
+    button:active { transform: translateY(1px); box-shadow: none; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.vermilion { background: var(--vermilion); border-color: var(--vermilion-ink); }
+    button.vermilion:hover { background: #c74730; }
+
+    /* ---- 印章式徽章 ---- */
+    .kind, .status, .queue-count, .src-tag {
+      display: inline-block; font-size: 11.5px; letter-spacing: 1px;
+      padding: 1px 9px; border-radius: 999px; line-height: 1.7;
+      border: 1px solid currentColor; background: transparent; white-space: nowrap;
+    }
+    .kind.ai { color: var(--indigo); background: rgba(47, 77, 107, .08); }
+    .kind.human { color: var(--ochre); background: rgba(125, 90, 36, .08); }
+    .status.active { color: var(--moss); background: rgba(72, 102, 61, .08); }
+    .status.suspended { color: var(--amber); background: rgba(154, 106, 26, .09); }
+    .status.terminated { color: var(--vermilion); background: rgba(178, 58, 38, .08); text-decoration: line-through; }
+    .queue-count { color: var(--indigo); background: rgba(47, 77, 107, .07); font-family: var(--mono); }
+    /* 待验收积压徽章：正常苔绿；超 48 时朱砂——验收黑洞一眼可见 */
+    .wait-badge {
+      font-family: var(--mono); font-size: 11px; color: var(--moss);
+      background: rgba(72, 102, 61, .08); border-radius: 999px; padding: 1px 7px;
+    }
+    .wait-badge.late { color: var(--vermilion); background: rgba(178, 58, 38, .1); font-weight: 600; }
+    .src-ai_delegated { color: var(--indigo); }
+    .src-self { color: var(--ink-2); }
+    .src-boss { color: var(--vermilion); }
+
+    /* ---- 任务时间线（台账展开行）：账房流水竖排 ---- */
+    tr.tl-row > td { background: var(--paper-deep); border-bottom: 1px solid var(--line); }
+    .tl-wrap { padding: 4px 6px 6px 22px; position: relative; }
+    .tl-wrap::before {   /* 左侧竖线（墨线） */
+      content: ""; position: absolute; left: 7px; top: 10px; bottom: 10px;
+      width: 1px; background: var(--line);
+    }
+    .tl-meta { font-size: 12px; color: var(--ink-2); margin: 0 0 8px;
+               padding-bottom: 6px; border-bottom: 1px dashed var(--line); }
+    .tl-node { position: relative; padding: 2.5px 0; font-size: 12.5px;
+               display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+    .tl-node::before {   /* 节点朱砂点 */
+      content: ""; position: absolute; left: -19px; top: 8px;
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--vermilion); transform: translateY(-2px);
+    }
+    .tl-node.tl-head::before { background: var(--ink); }
+    /* 催办节点：琥珀点 + 朱砂动作词，与状态流转节点区分 */
+    .tl-node.tl-urge::before { background: var(--amber); }
+    .tl-node.tl-urge .tl-move { color: var(--vermilion); }
+    .tl-at { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
+             font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .tl-move { font-weight: 600; color: var(--ink); white-space: nowrap; }
+    .tl-actor { color: var(--indigo); font-family: var(--mono); font-size: 11.5px; }
+    .tl-remark { color: var(--ink-3); font-size: 12px; }
+    .tl-dwell { color: var(--ochre); font-family: var(--mono); font-size: 11px;
+                white-space: nowrap; }
+    /* 节点操作签：墨框小签，点一下带人名跳到对应功能区（回信/看工位） */
+    .tl-act { display: inline-block; border: 1px solid var(--line);
+              border-radius: 3px; background: var(--paper);
+              color: var(--indigo); font-size: 11.5px; font-family: var(--mono);
+              padding: 1px 8px; cursor: pointer; white-space: nowrap;
+              line-height: 1.6; text-decoration: none; }
+    .tl-act:hover { border-color: var(--ink); color: var(--ink); }
+    /* 时间线内联回复框：不跳区，就地回信 */
+    .tl-acts { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .tl-reply { display: inline-flex; align-items: center; gap: 6px;
+                margin: 2px 0; width: 100%; }
+    .tl-reply textarea { flex: 1 1 auto; min-width: 140px; font-size: 12.5px;
+                         padding: 5px 8px; resize: none; font-family: var(--serif); }
+    .tl-reply button { padding: 4px 10px; font-size: 12px; }
+    .tl-reply-ok { color: var(--moss); font-size: 12px; font-family: var(--mono); }
+
+    /* ---- 操作反馈：朱批 ---- */
+    #opMsg {
+      margin: 0 0 14px; padding: 9px 14px; border-left: 3px solid var(--vermilion);
+      background: rgba(178, 58, 38, .06); border-radius: 0 4px 4px 0;
+      white-space: pre-wrap; font-family: var(--mono); font-size: 12.5px; color: var(--ink-2);
+      min-height: 0;
+    }
+
+    /* ---- 榜单 ---- */
+    .boards { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+    /* minmax(0,·)：轨宽不跟随表内容膨胀（grid 轨默认 auto 下限 = 内容宽），
+       宽表在手机上于各自卡内横滚，而非撑破 375 视口 */
+    @media (max-width: 980px) { .boards { grid-template-columns: minmax(0, 1fr); } }
+    .board-title { font-family: var(--serif); font-size: 13.5px; color: var(--ink-2); letter-spacing: 2px; margin: 2px 0 6px; }
+    #ptsSummary, #plansScope {
+      margin: 0 0 10px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+      background: linear-gradient(180deg, #f4eedd, #efe7d3); border: 1px solid var(--line);
+      border-radius: 4px; letter-spacing: .5px; font-variant-numeric: tabular-nums;
+    }
+    #ptsRules { margin: 6px 0 0; }
+    .rank { color: var(--gold); font-family: var(--serif); }
+    #finCard { font-variant-numeric: tabular-nums; }
+    #finCard table { margin-top: 6px; }
+
+    /* ---- 组织架构 / 复盘 ---- */
+    .dept { margin: 0 0 18px; }
+    .dept h3 { margin: 0 0 6px; font-family: var(--serif); font-size: 14.5px; letter-spacing: 2px; color: var(--ink); border-bottom: 1px dashed var(--line); padding-bottom: 5px; }
+
+    /* ---- 对话 ---- */
+    #chatLog { display: flex; flex-direction: column; max-width: 72%; min-height: 40px; margin-top: 6px; }
+    .chat-line {
+      margin: 5px 0; padding: 7px 12px; border-radius: 10px; max-width: 92%;
+      background: #fffdf7; border: 1px solid var(--line-soft);
+    }
+    .chat-line.me { background: rgba(47, 77, 107, .08); border-color: rgba(47, 77, 107, .25); margin-left: auto; }
+    .chat-line.ai { background: rgba(72, 102, 61, .06); border-color: rgba(72, 102, 61, .22); }
+    .chat-line .who { font-size: 11.5px; color: var(--ink-3); font-family: var(--mono); margin-bottom: 2px; }
+    .chat-line.busy { color: var(--ink-3); font-style: italic; background: var(--paper-deep); }
+
+    /* ---- 杂项 ---- */
+    .msg-meta { color: var(--ink-3); font-size: 12px; }
+    .empty { color: #a99e85; padding: 10px 8px; font-style: italic; }
+    #who { padding: 7px 10px; }
+    #loginBar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0; padding: 14px 0 18px; border-bottom: 1px solid var(--line-soft); }
+    #meInfo a { color: var(--vermilion); }
+    #focusBar a { color: var(--vermilion); font-weight: 600; }
+    #assignHint a { color: var(--vermilion); }
+    #batchHint a { color: var(--vermilion); }
+    /* staff 无派单权：勾选列整列隐藏（表头 + 行首格） */
+    #tasks.no-batch th:first-child, #tasks.no-batch td:first-child { display: none; }
+
+    /* ---- 手机版（≤720px）：单列布局 ----
+       宽表改「一表一滚动容器」横向滑动；表单纵排（输入占满行）；
+       输入字号 16px 防 iOS 聚焦自动放大；导航锚点横向滑条。 */
+    @media (max-width: 720px) {
+      html { scroll-padding-top: 92px; }
+      .wrap { padding: 0 14px 56px; }
+      .topbar-inner { padding: 8px 14px; gap: 6px 12px; }
+      .brand { font-size: 16px; }
+      .brand small { display: none; }
+      nav.anchors {
+        width: 100%; margin-left: 0; flex-wrap: nowrap;
+        overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+      }
+      nav.anchors::-webkit-scrollbar { display: none; }
+      nav.anchors a { flex: none; padding: 5px 8px; font-size: 12px; }
+      .masthead { flex-direction: column; align-items: flex-start; gap: 8px;
+                  padding: 18px 0 14px; }
+      .masthead h1 { font-size: 26px; letter-spacing: 3px; }
+      .masthead .ledger-no, .masthead #autoBar { text-align: left; padding-bottom: 0; }
+      section.sheet { padding: 14px 14px 16px; margin-top: 18px; }
+      section.sheet > h2 { margin: -14px -14px 14px; padding: 10px 14px 9px;
+                           font-size: 15.5px; letter-spacing: 1.5px; }
+      input, select, textarea { font-size: 16px; }
+      p.form-row { gap: 8px; }
+      p.form-row > input, p.form-row > select, p.form-row > textarea { width: 100% !important; }
+      p.form-row > button { width: auto !important; flex: 1 1 auto; padding: 10px 16px; }
+      #loginBar { flex-direction: column; align-items: stretch; }
+      #loginBar input { width: 100%; }
+      #loginBar button { width: 100%; padding: 10px 16px; }
+      table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      thead th, tbody td { white-space: nowrap; }
+      tr.tl-row > td { white-space: normal; }   /* 时间线行允许折行 */
+      .tl-act { padding: 4px 10px; font-size: 12px; }   /* 手指可点（≥28px 高） */
+      #chatContent { width: 100% !important; }
+      #chatLog { max-width: 100%; }
+      .chat-line { max-width: 90%; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span class="seal">账</span>老板驾驶舱<small>LAOBAN LEDGER</small></div>
+      <nav class="anchors">
+        <a href="#cockpit">驾驶舱</a><a href="#approvalSection">审批</a><a href="#perfSection">绩效</a>
+        <a href="#pointsSection">积分榜</a><a href="#financeSection">CFO 周报</a><a href="#plansSection">计划</a>
+        <a href="#orgSection">组织</a><a href="#employeesSection">花名册</a><a href="#workloadSection">负荷</a><a href="#chatSection">对话<i id="msgDot" class="nav-dot"></i></a>
+      </nav>
+    </div>
+  </header>
+  <div class="wrap">
+    <div class="masthead">
+      <h1>经营台账</h1>
+      <div class="sub">像经营公司一样管理人类与 AI 员工 · 派单 / 执行 / 验收 / 记分 / 晋升</div>
+      <div class="ledger-no" id="ledgerClock"></div>
+      <p id="autoBar" class="msg-meta">
+        <label title="每 30 秒自动重拉台账/负荷/绩效，标签页不可见时暂停">
+          <input type="checkbox" id="autoToggle" onchange="toggleAuto(this.checked)" /> 自动刷新
+        </label>
+        <span id="autoMeta">未刷新</span>
+        <span style="margin-left:14px">
+          <button id="pushBtn" onclick="togglePush()" title="开启后收件人不在看板前也能收到新消息系统通知">开启离线通知</button>
+          <span id="pushMeta"></span>
+        </span>
+      </p>
+    </div>
+
+    <p id="loginBar">
+      <input id="loginId" placeholder="员工 id，如 emp-chen" />
+      <input id="loginPw" type="password" placeholder="口令" />
+      <button class="vermilion" onclick="doLogin()">登录</button>
+      <span id="meInfo" class="msg-meta"></span>
+    </p>
+
+    <section class="sheet" id="cockpit">
+      <h2>任务驾驶舱<span class="hint">提交 → 派发 → 验收</span></h2>
+      <p id="focusBar" class="msg-meta">今日焦点：载入中…</p>
+      <p id="opMsg" class="msg-meta"></p>
+      <p class="form-row">
+        <input id="newTaskTitle" placeholder="新任务标题" style="width:22%" />
+        <input id="newTaskInstr" placeholder="任务说明（可选）" style="width:28%" />
+        <input id="newTaskDue" placeholder="截止（可选，2026-12-31 或 2026-12-31T18:00）" style="width:22%" />
+        <select id="newTaskHorizon" style="width:8%">
+          <option value="">周期</option>
+          <option value="day">日</option>
+          <option value="week">周</option>
+          <option value="month">月</option>
+          <option value="quarter">季</option>
+          <option value="half_year">半年</option>
+          <option value="year">年</option>
+        </select>
+        <button class="vermilion" onclick="submitTask()">提交任务</button>
+      </p>
+      <p class="form-row" id="assignRow">
+        <input id="assignId" placeholder="任务 id，如 T-abc123" />
+        <input id="assignTo" list="rosterIds" placeholder="派给谁（同事 id）" />
+        <datalist id="rosterIds"></datalist>
+        <button onclick="assignTask()">派发</button>
+        <span id="assignHint" class="msg-meta"></span>
+      </p>
+      <p class="form-row" id="acceptRow">
+        <input id="acceptId" placeholder="任务 id（doing/reporting）" />
+        <select id="acceptScore">
+          <option value="5">5 优秀</option><option value="4" selected>4 良好</option>
+          <option value="3">3 合格</option><option value="2">2 待改</option>
+          <option value="1">1 驳回</option>
+        </select>
+        <input id="acceptComment" placeholder="验收意见（可选，会回写员工记忆）" style="width:30%" />
+        <button class="vermilion" onclick="acceptTask()">验收</button>
+      </p>
+      <p class="form-row" id="reportRow">
+        <input id="reportId" placeholder="任务 id（人类任务，assigned）" />
+        <input id="reportText" placeholder="交付说明（做了什么 / 结果在哪）" style="width:38%" />
+        <button onclick="reportTask()">汇报交付</button>
+      </p>
+    </section>
+
+    <section class="sheet" id="approvalSection">
+      <h2>审批队列<span class="hint">高危放权 · 双轨招聘</span></h2>
+      <table id="approvals"><thead><tr>
+        <th>ID</th><th>类型</th><th>风险</th><th>发起人</th><th>摘要</th><th>状态</th><th>操作</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="headcountSection">
+      <h2>编制申请<span class="hint">扩编 / 招聘</span></h2>
+      <p class="form-row" id="hcFormRow">
+        <select id="hcType">
+          <option value="new_ai">新增 AI 员工</option>
+          <option value="clone_ai">复制现有 AI</option>
+          <option value="hire_human">招聘人类员工</option>
+        </select>
+        <input id="hcRole" placeholder="岗位 id（命中 org.json 模板则套用）" style="width:18%" />
+        <input id="hcDept" placeholder="部门" style="width:8%" />
+        <input id="hcSource" placeholder="复制源员工 id（仅复制时）" style="width:14%" />
+        <input id="hcCount" type="number" value="1" min="1" style="width:5%" />
+        <input id="hcReason" placeholder="申请理由（必填）" style="width:30%" />
+        <button onclick="submitHeadcount()">提交申请</button>
+      </p>
+      <table id="headcount"><thead><tr>
+        <th>ID</th><th>类型</th><th>岗位/来源</th><th>人数</th><th>发起人</th><th>理由</th><th>状态</th><th>操作</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="perfSection">
+      <h2>绩效面板<span class="hint">验收后记账</span></h2>
+      <table id="perf"><thead><tr>
+        <th>员工</th><th>完成数</th><th>总成本</th><th>平均耗时</th><th>驳回率</th><th>人类介入率</th><th>平均评分</th><th>按时完成率</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="payrollSection">
+      <h2>月度绩效报表<span class="hint">发薪 / 绩效面谈口径 · 按月统计</span></h2>
+      <p class="form-row">
+        <input id="payrollMonth" type="month" style="width:16%" />
+        <button onclick="loadPayroll()">载入月报</button>
+        <button class="vermilion" onclick="exportPayroll()">导出 CSV</button>
+      </p>
+      <table id="payroll"><thead><tr>
+        <th>员工</th><th>类型</th><th>部门</th><th>完成数</th><th>总成本</th><th>平均评分</th><th>按时完成率</th><th>积分</th><th>驳回数</th>
+      </tr></thead><tbody></tbody></table>
+      <p id="payrollMeta" class="hint"></p>
+    </section>
+
+    <section class="sheet" id="pointsSection">
+      <h2>奖励积分榜<span class="hint">人类 / AI 分榜 · ROI 统一对比</span></h2>
+      <p id="ptsSummary"></p>
+      <div class="boards">
+        <div>
+          <div class="board-title">人类员工</div>
+          <table id="ptsHuman"><thead><tr>
+            <th>人类员工</th><th>部门</th><th>积分</th><th>完成数</th><th>驳回</th><th>平均评分</th><th>按时完成率</th><th>累计成本(元)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+        <div>
+          <div class="board-title">AI 员工</div>
+          <table id="ptsAI"><thead><tr>
+            <th>AI 员工</th><th>部门</th><th>积分</th><th>完成数</th><th>驳回</th><th>平均评分</th><th>按时完成率</th><th>累计成本(元)</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+      <table id="ptsROI"><thead><tr>
+        <th>ROI 统一榜</th><th>族群</th><th>积分</th><th>累计成本(元)</th><th>每元成本产出积分</th>
+      </tr></thead><tbody></tbody></table>
+      <p id="ptsRules" class="empty" style="margin:4px 0 0"></p>
+    </section>
+
+    <section class="sheet" id="financeSection">
+      <h2>CFO 周报<span class="hint">成本 / 积分 / ROI · 按周归档</span></h2>
+      <div id="finCard" class="empty" style="margin:4px 0 0">加载中…</div>
+    </section>
+
+    <section class="sheet" id="reportSection">
+      <h2>复盘报告<span class="hint">按部门</span></h2>
+      <table id="report"><thead><tr>
+        <th>部门</th><th>完成数</th><th>驳回次数</th><th>教训数</th><th>自动复盘</th><th>成员明细</th>
+      </tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="orgSection">
+      <h2>组织架构</h2>
+      <div id="org"></div>
+    </section>
+
+    <section class="sheet" id="tasksSection">
+      <h2>任务台账</h2>
+      <p class="form-row">
+        <select id="taskStateFilter" onchange="renderTasks()" style="width:14%">
+          <option value="">全部任务</option>
+          <option value="flying">在飞（已派未完）</option>
+          <option value="reporting">待验收</option>
+          <option value="pending">待分拣</option>
+          <option value="overdue">已超期</option>
+          <option value="blocked">已阻塞</option>
+          <option value="done">已完成</option>
+        </select>
+        <input id="taskWhoFilter" list="rosterIds" placeholder="按承接人筛（空 = 全部）" style="width:20%" onchange="renderTasks()" oninput="renderTasks()" />
+        <span id="taskFilterMeta" class="msg-meta"></span>
+      </p>
+      <p class="form-row" id="batchRow" style="display:none">
+        <span class="msg-meta">已勾选 <b id="batchCount">0</b> 件待派任务</span>
+        <input id="batchAssignTo" list="rosterIds" placeholder="批量派给谁（员工 id）" style="width:20%" />
+        <button onclick="batchAssign()">批量派发</button>
+        <span id="batchHint" class="msg-meta"></span>
+      </p>
+      <table id="tasks"><thead><tr><th><input type="checkbox" id="taskSelAll" title="全选待派任务" onchange="toggleSelAll(this.checked)" /></th><th>ID</th><th>标题</th><th>状态</th><th>截止</th><th>周期</th><th>操作</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="plansSection">
+      <h2>我的任务计划<span class="hint">日 / 周 / 月 / 季 / 半年 / 年</span></h2>
+      <p id="plansScope"></p>
+      <p class="form-row">
+        <input id="plansWho" list="rosterIds" placeholder="查谁的计划（员工 id，空 = 按权限汇总）" style="width:28%" />
+        <button onclick="loadPlans()">查看</button>
+        <span class="msg-meta">含被动分配与个人计划，按周期分组，显示完成情况</span>
+      </p>
+      <div id="plansBoard"></div>
+    </section>
+
+    <section class="sheet" id="employeesSection">
+      <h2>员工花名册</h2>
+      <table id="employees"><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>部门</th><th>状态</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="workloadSection">
+      <h2>员工负荷<span class="hint">在办 / 待执行 / 执行中 / 待验收 · 派单前看谁闲</span></h2>
+      <table id="workload"><thead><tr>
+        <th>员工</th><th>类型</th><th>部门</th><th>状态</th><th>在办</th><th>待执行</th><th>执行中</th><th>待验收</th><th>超期</th><th>今日完成</th>
+      </tr></thead><tbody></tbody></table>
+      <p id="workloadMeta" class="hint"></p>
+    </section>
+
+    <section class="sheet" id="chatSection">
+      <h2>与 AI 员工对话</h2>
+      <p class="form-row">
+        <input id="chatFrom" placeholder="我的员工 id，如 emp-chen" />
+        <input id="chatTo" list="aiEmployees" placeholder="同事 id，如 dev（可下拉选择）" style="width:240px" />
+        <datalist id="aiEmployees"></datalist>
+        <button onclick="loadChatHistory()">载入历史消息</button>
+      </p>
+      <p class="form-row" style="align-items:flex-start">
+        <textarea id="chatContent" rows="2" style="width:56%" placeholder="输入消息，Enter 发送（Shift+Enter 换行）"></textarea>
+        <button class="vermilion" onclick="sendChat()">发送</button>
+      </p>
+      <div id="chatLog"></div>
+    </section>
+
+    <section class="sheet" id="msgSection">
+      <h2>点对点消息</h2>
+      <p class="form-row">
+        <input id="msgWho" placeholder="员工 id，如 dev" />
+        <button onclick="loadMessages()">查看收发件箱</button>
+      </p>
+      <table id="msgInbox"><thead><tr><th>ID</th><th>发件人 → 收件人</th><th>内容</th></tr></thead><tbody></tbody></table>
+      <table id="msgSent"><thead><tr><th>ID</th><th>发件人 → 收件人</th><th>内容</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="queueSection">
+      <h2>工位任务队列</h2>
+      <p class="form-row">
+        <input id="queueWho" placeholder="员工 id，如 dev" />
+        <button onclick="loadQueue()">查看队列</button>
+      </p>
+      <table id="queueTasks"><thead><tr><th>任务 ID</th><th>标题</th><th>状态</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section class="sheet" id="humanSection">
+      <h2>人类员工当日任务清单</h2>
+      <p class="form-row">
+        <input id="who" placeholder="员工 id，如 emp-陈工" />
+        <button onclick="loadHumanTasks()">查看今日清单</button>
+        <button onclick="loadHumanResults()">查看回传结果</button>
+      </p>
+      <table id="humanTasks"><thead><tr><th>ID</th><th>标题</th><th>来源</th><th>截止</th><th>状态</th></tr></thead><tbody></tbody></table>
+      <table id="humanResults"><thead><tr><th>ID</th><th>标题</th><th>承接人</th><th>回传结果</th></tr></thead><tbody></tbody></table>
+    </section>
+  </div>
+
+  <script>
+    const SRC_LABEL = { ai_delegated: 'AI 派发', self: '自建', boss: '老板指派' };
+    const STATUS_LABEL = { active: '在职', suspended: '停职', terminated: '已解雇' };
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    function kindBadge(kind) {
+      return `<span class="kind ${esc(kind)}">${kind === 'human' ? '人类' : 'AI'}</span>`;
+    }
+    function statusBadge(status) {
+      return `<span class="status ${esc(status)}">${esc(STATUS_LABEL[status] || status)}</span>`;
+    }
+
+    const HORIZON_LABELS = {day:'日', week:'周', month:'月', quarter:'季', half_year:'半年', year:'年', '':'—'};
+    const STATE_LABEL = {pending:'待分拣', triage:'分拣中', planning:'规划中',
+                         review:'评审中', assigned:'已派发', doing:'执行中',
+                         waiting_human:'等人工', reporting:'待验收',
+                         done:'已完成', cancelled:'已取消', blocked:'已阻塞'};
+
+    // reporting 状态积压时长：交付后等老板验收的等待黑洞要看得见
+    function waitBadge(t) {
+      if (t.state !== 'reporting' || !t.updated_at) return '';
+      const hours = (Date.now() - new Date(t.updated_at).getTime()) / 3600000;
+      if (!isFinite(hours) || hours < 0) return '';
+      const txt = hours < 1 ? `${Math.max(1, Math.round(hours * 60))}分`
+                : hours < 48 ? `${Math.round(hours)}时`
+                : `${Math.round(hours / 24)}天`;
+      const cls = hours >= 48 ? 'wait-badge late' : 'wait-badge';
+      return ` <span class="${cls}" title="等验收时长（超 48 时标红）">⏱${txt}</span>`;
+    }
+
+    // 在飞任务超期小时数（>0 = 已超期）：assigned/doing/reporting/waiting_human
+    // 且过了 due_at。口径与验收时效积分一致；无限期任务不参与。
+    function overdueHours(t) {
+      if (!['assigned', 'doing', 'reporting', 'waiting_human'].includes(t.state)
+          || !t.due_at) return 0;
+      const h = (Date.now() - new Date(t.due_at).getTime()) / 3600000;
+      return isFinite(h) && h > 0 ? h : 0;
+    }
+
+    // 超期红牌：事前预警（验收追责是事后诸葛，超期的价值在于还来得及催）
+    function overdueBadge(t) {
+      const h = overdueHours(t);
+      if (!h) return '';
+      const days = Math.floor(h / 24);
+      const txt = days >= 1 ? `超期${days}天` : `超期${Math.max(1, Math.round(h))}时`;
+      const due = esc(t.due_at.slice(0, 16).replace('T', ' '));
+      const urges = (t.urge_log || []).length;
+      const escBadge = urges ? ` <span class="wait-badge" title="已催办 ${urges} 次${urges > 1 ? '（未响应会逐级抄送上级）' : ''}">催${urges}</span>` : '';
+      return ` <span class="wait-badge late" title="截止 ${due} 已过">⚠${txt}</span>${escBadge}`;
+    }
+
+    // 待验收积压 + 超期预警计数：任务台账标题一眼看到交付黑洞和风险
+    function backlogNote(ts) {
+      const rp = ts.filter(t => t.state === 'reporting');
+      const od = ts.filter(t => overdueHours(t) > 0);
+      const parts = [];
+      if (rp.length) {
+        const worst = Math.max(...rp.map(t =>
+          (Date.now() - new Date(t.updated_at).getTime()) / 3600000));
+        const worstTxt = isFinite(worst) ? `，最老 ${Math.round(worst)} 时` : '';
+        parts.push(`待验收 ${rp.length} 件${worstTxt}`);
+      }
+      if (od.length) parts.push(`超期 ${od.length} 件`);
+      return parts.length ? ` <span class="hint">${parts.join('，')}</span>` : '';
+    }
+
+    // 今日焦点栏：老板打开看板 3 秒内知道该处理什么
+    // （审批积压 / 待验收黑洞 / 超期在飞 / 死单阻塞，均可点击跳转）
+    function renderFocus() {
+      const tasks = window._tasks || [];
+      const approvals = window._approvals || [];
+      const parts = [];
+      const pending = approvals.filter(a => a.status === 'pending').length;
+      if (pending) parts.push(`待审批 <a href="#approvalSection">${pending} 件</a>`);
+      const rp = tasks.filter(t => t.state === 'reporting');
+      if (rp.length) {
+        const worst = Math.max(...rp.map(t =>
+          (Date.now() - new Date(t.updated_at).getTime()) / 3600000));
+        const worstTxt = isFinite(worst) && worst >= 1
+          ? `（最老 ${Math.round(worst)} 时）` : '';
+        parts.push(`待验收 <a href="#tasksSection">${rp.length} 件${worstTxt}</a>`);
+      }
+      const od = tasks.filter(t => overdueHours(t) > 0);
+      if (od.length) parts.push(`超期在飞 <a href="#tasksSection">${od.length} 件</a>`);
+      const blk = tasks.filter(t => t.state === 'blocked');
+      if (blk.length) parts.push(`阻塞 <a href="#tasksSection">${blk.length} 件</a>`);
+      document.getElementById('focusBar').innerHTML =
+        '<b>今日焦点：</b>' + (parts.length ? parts.join(' · ')
+                                    : '无积压——审批 / 验收 / 在飞全清');
+    }
+
+    // 任务台账筛选：在飞 / 待验收 / 待分拣 / 超期 / 阻塞 / 完成 + 承接人
+    const FLYING_STATES = ['assigned', 'doing', 'reporting', 'waiting_human'];
+    function taskMatches(t, filter, who) {
+      if (who && (t.assignee || '') !== who) return false;
+      switch (filter) {
+        case 'flying': return FLYING_STATES.includes(t.state);
+        case 'reporting': return t.state === 'reporting';
+        case 'pending': return t.state === 'pending';
+        case 'overdue': return overdueHours(t) > 0;
+        case 'blocked': return t.state === 'blocked';
+        case 'done': return t.state === 'done';
+        default: return true;
+      }
+    }
+
+    // ---- 批量勾选（仅待分拣 pending 任务可勾，派发后自动失效）----
+    function batchSel() {
+      if (!window._batchSel) window._batchSel = new Set();
+      return window._batchSel;
+    }
+
+    function toggleBatchSel(id, checked) {
+      const sel = batchSel();
+      if (checked) sel.add(id); else sel.delete(id);
+      updateBatchRow();
+    }
+
+    function toggleSelAll(checked) {
+      const sel = batchSel();
+      const tasks = (window._tasks || []).filter(t =>
+        taskMatches(t, document.getElementById('taskStateFilter').value,
+                    document.getElementById('taskWhoFilter').value.trim()));
+      tasks.forEach(t => {
+        if (t.state === 'pending') checked ? sel.add(t.id) : sel.delete(t.id);
+      });
+      renderTasks();   // 同步行勾选态
+    }
+
+    function updateBatchRow() {
+      const row = document.getElementById('batchRow');
+      if (!row) return;
+      // 权限优先（loadMe 设 _canManage；staff 不可派单），
+      // 其次有无待派任务（无勾选对象整行隐藏）
+      const canManage = window._canManage !== false;
+      row.style.display = (canManage &&
+        (window._tasks || []).some(t => t.state === 'pending')) ? '' : 'none';
+      document.getElementById('batchCount').textContent = batchSel().size;
+      const btn = row.querySelector('button');
+      if (btn) btn.disabled = batchSel().size === 0;   // 0 件禁用防误点
+    }
+
+    async function batchAssign() {
+      const ids = [...batchSel()];
+      const to = document.getElementById('batchAssignTo').value.trim();
+      if (!ids.length || !to) { alert('请先勾选待派任务并填写承接人'); return; }
+      const { ok, data, status } = await opPost('/api/task/assign-batch', { ids, to });
+      if (ok) {
+        // 清掉已出货的勾选（失败的留着，老板可换单人再派；
+        // opFeedback → load() 会重渲染台账并清理失效勾选）
+        data.assigned.forEach(id => batchSel().delete(id));
+        document.getElementById('batchAssignTo').value = '';
+      }
+      opFeedback(ok, data, status);
+    }
+
+    // ---- 任务时间线：每单流转历史可追溯（flow_log 逐条 + 停留时长）----
+    function tlOpen() {
+      if (!window._tlOpen) window._tlOpen = new Set();
+      return window._tlOpen;
+    }
+
+    function toggleTimeline(id) {
+      const open = tlOpen();
+      open.has(id) ? open.delete(id) : open.add(id);
+      renderTasks();
+    }
+
+    // 时长口语化：3分 / 2时 / 5天
+    function dwellText(ms) {
+      if (!isFinite(ms) || ms <= 0) return '';
+      const min = ms / 60000;
+      return min < 60 ? `${Math.max(1, Math.round(min))}分`
+           : min < 1440 ? `${Math.round(min / 60)}时`
+           : `${Math.round(min / 1440)}天`;
+    }
+
+    function timelineHtml(t) {
+      // 节点 = 提交（created_at）+ 每次状态流转（flow_log）+ 每次催办（urge_log），
+      // 三类事件按时间合流：流转史与催办/升级史在同一条线上完整可追溯
+      const nodes = [{ at: t.created_at, kind: 'submit',
+                       actor: t.created_by, remark: `提交《${t.title}》` }]
+        .concat((t.flow_log || []).map(n => Object.assign({}, n, { kind: 'flow' })))
+        .concat((t.urge_log || []).map((n, i) =>
+          Object.assign({}, n, { kind: 'urge', seq: i + 1 })))
+        .sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+      const rows = nodes.map((n, i) => {
+        const at = (n.at || '').slice(0, 16).replace('T', ' ');
+        let move = '', cls = 'tl-node', remark = n.remark || '';
+        const actor = n.kind === 'urge' ? n.by : n.actor;
+        if (n.kind === 'submit') {
+          move = '提交立项'; cls += ' tl-head';
+        } else if (n.kind === 'urge') {
+          move = `第 ${n.seq} 次催办`; cls += ' tl-urge';
+          remark = `由 ${n.by} 催 ${n.to}`
+            + (n.escalated_to ? `，升级抄送 ${n.escalated_to}` : '')
+            + (n.auto ? '（自动）' : '');
+        } else {
+          move = `${STATE_LABEL[n.from] || n.from || '—'} → ${STATE_LABEL[n.to] || n.to}`;
+        }
+        // 停留时长：本节点距上一节点的时间差（卡在哪个环节一目了然）
+        const prev = i > 0 ? nodes[i - 1].at : '';
+        const dwell = i > 0 && prev && n.at
+          ? dwellText(new Date(n.at) - new Date(prev)) : '';
+        // 操作签：带人名直达功能区（催办节点可回承接人/被抄送的上级，
+        // 流转节点可找该环节操作人；自己跳过，后端权限仍是最终把关）
+        const acts = tlNodeActs(n);
+        return `<div class="${cls}">` +
+          `<span class="tl-at">${esc(at)}</span><span class="tl-move">${esc(move)}</span>` +
+          (actor ? `<span class="tl-actor">${esc(actor)}</span>` : '') +
+          (remark ? `<span class="tl-remark">${esc(remark)}</span>` : '') +
+          (dwell ? `<span class="tl-dwell" title="上一环节到此停留">⏳${esc(dwell)}</span>` : '') +
+          (acts ? `<span class="tl-acts">${acts}</span>` : '') +
+          `</div>`;
+      }).join('');
+      const meta = `提交人 ${esc(t.created_by || '—')} · 承接人 ${esc(t.assignee || '未指派')}`
+        + (t.assignee ? ` <a class="tl-act" href="#queueSection" title="看 ${esc(t.assignee)} 的工位队列" onclick="tlQueue('${esc(t.assignee)}');return false;">工位</a>` : '')
+        + ` · 返工 ${t.review_round || 0} 轮 · 现状 ${esc(STATE_LABEL[t.state] || t.state)}`
+        + (t.block_reason ? ` · 阻塞原因：${esc(t.block_reason)}` : '')
+        + ` · 截止 ${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '不限期'}`;
+      return `<tr class="tl-row"><td colspan="7"><div class="tl-wrap">` +
+        `<p class="tl-meta">${meta}</p>${rows}</div></td></tr>`;
+    }
+
+    function tlNodeActs(n) {
+      // 节点操作签（HTML）：回信谁就生成谁的签；本人节点不出签。
+      // 点击就地展开内联回复框（不跳区），回车/点发送即回信。
+      const me = window._me?.id;
+      const chip = (id, label) =>
+        (id && id !== me && n.kind !== 'submit')
+          ? `<a class="tl-act" href="#" title="给 ${esc(id)} 内联回复" onclick="tlReplyInline('${esc(id)}', this);return false;">${esc(label)}</a>`
+          : '';
+      if (n.kind === 'urge') {
+        // 升级节点直接回复：催的是承接人，抄送的是上级——都可一键回信
+        return chip(n.to, `回 ${n.to}`) + chip(n.escalated_to, `回 ${n.escalated_to}`);
+      }
+      return chip(n.actor, `找 ${n.actor}`);   // 流转节点：找该环节操作人问进度
+    }
+
+    // 时间线内联回复：点操作签就地展开回复框（不再跳到对话区）
+    function tlReplyInline(emp, anchor) {
+      if (!emp) return;
+      const wrap = anchor.closest('.tl-acts');
+      if (!wrap) return;
+      // 已展开 → 再点收起（toggle）；同一节点只保留一个回复框
+      const existing = wrap.querySelector('.tl-reply');
+      if (existing) { existing.remove(); return; }
+      const box = document.createElement('div');
+      box.className = 'tl-reply';
+      const ta = document.createElement('textarea');
+      ta.rows = 1;
+      ta.placeholder = `回复 ${emp}…（Enter 发送，Shift+Enter 换行）`;
+      const btn = document.createElement('button');
+      btn.textContent = '发送';
+      const send = () => tlReplySend(emp, ta, btn, box);
+      ta.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+      });
+      btn.onclick = send;
+      box.appendChild(ta); box.appendChild(btn);
+      wrap.appendChild(box);
+      ta.focus();
+    }
+
+    // 内联回复发送：走与对话区同一个 /api/chat，后端权限口径一致
+    async function tlReplySend(to, ta, btn, box) {
+      const content = (ta.value || '').trim();
+      if (!content) { ta.focus(); return; }
+      const from = window._me?.id || document.getElementById('chatFrom').value.trim();
+      if (!from) { alert('请先在对话区填写/登录我的员工 id'); return; }
+      btn.disabled = true;
+      try {
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from, to, content }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          alert(data.error || `HTTP ${resp.status}`);
+          btn.disabled = false;
+          return;
+        }
+        const note = data.reply == null
+          ? '已投递到对方收件箱' : (data.reply || '已发送');
+        box.innerHTML = `<span class="tl-reply-ok">✓ 已回 ${esc(to)}：${esc(note)}</span>`;
+        // 对话里当场读过的回复 = 已读（与 sendChat 同口径）
+        if (window._me?.id && from === window._me.id) {
+          try {
+            await fetch('/api/messages/read', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ who: from }),
+            });
+          } catch (e) { /* 失败由下轮刷新兜底 */ }
+          loadUnread();
+        }
+        loadTasks();
+      } catch (e) {
+        btn.disabled = false;
+        alert('请求失败：' + e.message);
+      }
+    }
+
+    // 时间线跳转②：看承接人工位队列（staff 的队列框锁定本人，不越权代查）
+    function tlQueue(emp) {
+      if (!emp) return;
+      const q = document.getElementById('queueWho');
+      if (!q || q.disabled) return;
+      q.value = emp;
+      loadQueue();
+      document.getElementById('queueSection').scrollIntoView({ behavior: 'smooth' });
+    }
+
+    function renderTasks() {
+      const tasks = window._tasks || [];
+      const filter = document.getElementById('taskStateFilter').value;
+      const who = document.getElementById('taskWhoFilter').value.trim();
+      const shown = tasks.filter(t => taskMatches(t, filter, who));
+      const sel = batchSel();
+      // 勾选残留清理：已派发/完成的任务不再是合法选择
+      [...sel].forEach(id => {
+        const t = tasks.find(x => x.id === id);
+        if (!t || t.state !== 'pending') sel.delete(id);
+      });
+      document.querySelector('#tasksSection h2').innerHTML =
+        '任务台账' + backlogNote(tasks);
+      document.querySelector('#tasks tbody').innerHTML = shown.length
+        ? shown.map(t => {
+          const acts = [];
+          // 详情：任何状态都有流转历史可看（含终态任务的审计回溯）
+          const open = tlOpen().has(t.id);
+          acts.push(`<button class="tl-btn${open ? ' vermilion' : ''}" onclick="toggleTimeline('${esc(t.id)}')">详情${open ? '▲' : '▼'}</button>`);
+          if (t.state === 'blocked') {
+            acts.push(`<button onclick="retryTask('${esc(t.id)}')">重新执行</button>`);
+          } else if (overdueHours(t) > 0) {
+            acts.push(`<button class="vermilion" onclick="urgeTask('${esc(t.id)}')">催办</button>`);
+          }
+          const chk = t.state === 'pending'
+            ? `<input type="checkbox" ${sel.has(t.id) ? 'checked' : ''} onchange="toggleBatchSel('${esc(t.id)}', this.checked)" title="勾选批量派发" />`
+            : '·';
+          return `<tr><td>${chk}</td><td>${esc(t.id)}</td><td>${esc(t.title)}</td>` +
+          `<td>${esc(STATE_LABEL[t.state] || t.state)}${waitBadge(t)}${t.block_reason ? ` <span class="hint" title="${esc(t.block_reason)}">ⓧ原因</span>` : ''}</td>` +
+          `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}${overdueBadge(t)}</td>` +
+          `<td>${HORIZON_LABELS[t.plan_horizon] ?? '—'}</td>` +
+          `<td>${acts.join(' ')}</td></tr>` +
+          (open ? timelineHtml(t) : '');   // 展开行：紧跟任务行
+        }).join('')
+        : '<tr><td colspan="7" class="empty">无匹配任务（换个筛选条件试试）</td></tr>';
+      // 全选框态同步：当前可见待派任务全勾才亮（部分勾 = 半选态浏览器自渲染）
+      const visiblePending = shown.filter(t => t.state === 'pending');
+      document.getElementById('taskSelAll').checked =
+        visiblePending.length > 0 && visiblePending.every(t => sel.has(t.id));
+      document.getElementById('taskFilterMeta').textContent =
+        tasks.length ? `显示 ${shown.length} / ${tasks.length} 件` : '';
+      updateBatchRow();
+    }
+
+    async function load() {
+      // in-flight 守卫：自动刷新的轮询不与正在跑的刷新叠加（省重复请求）；
+      // 操作后的手动 load 不查此标志（必刷，保操作反馈及时）。
+      window._loading = true;
+      try {
+        await _loadAll();
+      } finally {
+        window._loading = false;
+      }
+    }
+
+    async function _loadAll() {
+      // 未登录时接口返回 401 JSON 对象（非数组），需防御避免 .map 崩溃
+      const ts = await (await fetch('/api/tasks')).json().catch(() => []);
+      window._tasks = Array.isArray(ts) ? ts : [];
+      renderTasks();
+      renderFocus();
+      const es = await (await fetch('/api/employees')).json().catch(() => []);
+      const roster = Array.isArray(es) ? es : [];
+      document.querySelector('#employees tbody').innerHTML = roster.map(e =>
+        `<tr><td>${esc(e.id)}</td><td>${kindBadge(e.kind)}</td>` +
+        `<td>${esc(e.name)}</td><td>${esc(e.title)}</td><td>${esc(e.department)}</td>` +
+        `<td>${statusBadge(e.status)}</td></tr>`).join('');
+      // 聊天目标下拉：AI 员工（含状态，便于挑在岗的）
+      document.getElementById('aiEmployees').innerHTML = roster.filter(e =>
+        e.kind === 'ai').map(e =>
+        `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.title || 'AI 员工')}（${esc(STATUS_LABEL[e.status] || e.status)}）</option>`).join('');
+      // 派单目标下拉：全员
+      document.getElementById('rosterIds').innerHTML = roster.map(e =>
+        `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.title || '')}（${esc(STATUS_LABEL[e.status] || e.status)}）</option>`).join('');
+      await loadOrg();
+      await loadMe();
+      await loadWorkload();
+      await loadApprovals();
+      await loadHeadcount();
+      await loadPerf();
+      await loadPayroll();
+      await loadPoints();
+      await loadFinance();
+      await loadPlans();
+      await loadReport();
+    }
+
+    async function loadMe() {
+      const resp = await fetch('/api/me');
+      if (!resp.ok) { setMe(null); return; }
+      const me = await resp.json();
+      setMe(me.id ? me : null);
+    }
+
+    function setMe(me) {
+      const info = document.getElementById('meInfo');
+      const from = document.getElementById('chatFrom');
+      window._me = me || {};   // loadApprovals 判断是否 admin 用
+      // 个人数据查询框：登录后按角色锁定（staff/manager 只能查自己相关）
+      const personal = ['msgWho', 'queueWho', 'who'];
+      const scoped = {   // role → 需要锁定为本人的查询框
+        staff: personal,               // 只能查自己的一切
+        manager: ['msgWho'],           // 消息只能查自己；队列/待办可查部门成员（API 层校验）
+        admin: [],
+      };
+      if (me) {
+        const role = me.role || 'staff';
+        const badge = {admin: '管理员', manager: '部门负责人', staff: '员工'}[role] || role;
+        info.textContent = `已登录：${me.name}（${me.id}${me.title ? ' · ' + me.title : ''}）`;
+        info.insertAdjacentHTML('beforeend',
+          ` <span class="kind ${role === 'admin' ? 'ai' : 'human'}">${badge}</span>` +
+          (role !== 'admin' && me.department ? ` · 可见范围：${me.department}` : '') +
+          ' <a href="#" onclick="doLogout();return false;">退出</a>');
+        from.value = me.id;
+        from.disabled = true;   // 登录后锁定身份，防手改
+        loadUnread();           // 登录/每轮刷新：拉本人未读数点亮红点
+        for (const id of personal) {
+          const el = document.getElementById(id);
+          el.value = (scoped[role] || personal).includes(id) ? me.id : el.value;
+          el.disabled = (scoped[role] || personal).includes(id);
+        }
+        // 操作区按角色显隐：staff 只能提交；manager 派单+验收（本部门）；admin 全量
+        const canManage = role === 'admin' || role === 'manager';
+        window._canManage = canManage;   // 批量派发行同步显隐
+        document.getElementById('assignRow').style.display = canManage ? '' : 'none';
+        document.getElementById('acceptRow').style.display = canManage ? '' : 'none';
+        // 勾选框列对 staff 无意义（无权派发）：CSS 整列隐藏
+        document.querySelector('#tasks').classList.toggle('no-batch', !canManage);
+        updateBatchRow();
+        // 编制申请表单：仅 manager/admin 可提交（staff 无部门管理权）
+        document.getElementById('hcFormRow').style.display = canManage ? '' : 'none';
+      } else {
+        info.textContent = '';
+        from.disabled = false;
+        for (const id of personal) document.getElementById(id).disabled = false;
+        loadUnread();           // 登出：熄红点（loadUnread 见未登录即清除）
+        window._canManage = true;
+        document.getElementById('assignRow').style.display = '';
+        document.getElementById('acceptRow').style.display = '';
+        document.getElementById('hcFormRow').style.display = '';
+        updateBatchRow();
+      }
+    }
+
+    // ---- 任务驾驶舱 ----
+    async function opPost(path, payload) {
+      const resp = await fetch(path, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json().catch(() => ({}));
+      return { ok: resp.ok, status: resp.status, data };
+    }
+
+    function opFeedback(ok, data, status) {
+      const el = document.getElementById('opMsg');
+      el.textContent = ok ? (data.message || '操作成功')
+                          : `批注：${data.error || ('HTTP ' + status)}`;
+      el.style.color = ok ? 'var(--moss)' : 'var(--vermilion)';
+      if (ok) { load(); loadApprovals(); loadPerf(); loadPoints(); loadPlans(); }
+    }
+
+    async function submitTask() {
+      const title = document.getElementById('newTaskTitle').value.trim();
+      const instruction = document.getElementById('newTaskInstr').value.trim();
+      const due_at = document.getElementById('newTaskDue').value.trim();
+      const plan_horizon = document.getElementById('newTaskHorizon').value;
+      if (!title) { alert('请输入任务标题'); return; }
+      const { ok, data, status } = await opPost('/api/task/submit', { title, instruction, due_at, plan_horizon });
+      if (ok) {
+        document.getElementById('newTaskTitle').value = '';
+        document.getElementById('newTaskInstr').value = '';
+        document.getElementById('newTaskDue').value = '';
+        document.getElementById('assignId').value = data.id;   // 顺手填入派单框
+      }
+      opFeedback(ok, data, status);
+      if (ok) loadPlans();
+    }
+
+    async function assignTask() {
+      const id = document.getElementById('assignId').value.trim();
+      const to = document.getElementById('assignTo').value.trim();
+      if (!id || !to) { alert('请填写任务 id 与承接人'); return; }
+      const { ok, data, status } = await opPost('/api/task/assign', { id, to });
+      if (ok) {
+        document.getElementById('assignId').value = '';
+        document.getElementById('acceptId').value = data.id;   // 顺手填入验收框
+      }
+      opFeedback(ok, data, status);
+    }
+
+    async function acceptTask() {
+      const id = document.getElementById('acceptId').value.trim();
+      const score = parseInt(document.getElementById('acceptScore').value, 10);
+      const comment = document.getElementById('acceptComment').value.trim();
+      if (!id) { alert('请填写任务 id'); return; }
+      const { ok, data, status } = await opPost('/api/task/accept', { id, score, comment });
+      if (ok) {
+        document.getElementById('acceptId').value = '';
+        document.getElementById('acceptComment').value = '';
+      }
+      opFeedback(ok, data, status);
+      // 复盘结论直接展示：老板验收即看到员工学到了什么（低分教训下次生效）
+      if (ok && data.review && data.review.learned) {
+        const el = document.getElementById('opMsg');
+        const tag = data.review.auto ? '（AI 自动复盘）' : '（采纳验收评语）';
+        el.textContent += `\n复盘${tag}：${data.review.learned}`;
+      }
+      // 晋升申请提示：连续验收通过 → 自动申请升自主等级，去审批队列决策
+      if (ok && data.promotion) {
+        const el = document.getElementById('opMsg');
+        el.textContent += `\n晋升申请已自动提交：${data.promotion.summary}（见审批队列）`;
+        el.style.color = 'var(--moss)';
+      }
+      // 积分入账提示：统一记分，看积分榜横向对比
+      if (ok && data.points !== null && data.points !== undefined) {
+        const el = document.getElementById('opMsg');
+        el.textContent += `\n积分入账：${data.assignee} 当前累计积分 ${data.points}（见奖励积分榜）`;
+      }
+    }
+
+    async function reportTask() {
+      const id = document.getElementById('reportId').value.trim();
+      const deliverable = document.getElementById('reportText').value.trim();
+      if (!id || !deliverable) { alert('请填写任务 id 与交付说明'); return; }
+      const { ok, data, status } = await opPost('/api/task/report', { id, deliverable });
+      if (ok) {
+        document.getElementById('reportId').value = '';
+        document.getElementById('reportText').value = '';
+      }
+      opFeedback(ok, data, status);
+    }
+
+    async function retryTask(id) {
+      const { ok, data, status } = await opPost('/api/task/retry', { id });
+      opFeedback(ok, data, status);
+    }
+
+    async function urgeTask(id) {
+      const { ok, data, status } = await opPost('/api/task/urge', { id });
+      opFeedback(ok, data, status);
+    }
+
+    async function decideApproval(id, approved) {
+      const opinion = prompt(approved ? '审批意见（可空）：' : '驳回理由（可空）：') || '';
+      const { ok, data, status } = await opPost('/api/approval/decide',
+                                                { id, approved, opinion });
+      opFeedback(ok, data, status);
+    }
+
+    // ---- 编制申请（部门负责人提交，老板审批通过即自动入职）----
+    async function submitHeadcount() {
+      const reason = document.getElementById('hcReason').value.trim();
+      if (!reason) { alert('请填写申请理由'); return; }
+      const payload = {
+        hire_type: document.getElementById('hcType').value,
+        role: document.getElementById('hcRole').value.trim(),
+        department: document.getElementById('hcDept').value.trim(),
+        source_emp_id: document.getElementById('hcSource').value.trim(),
+        headcount: parseInt(document.getElementById('hcCount').value, 10) || 1,
+        reason,
+      };
+      const { ok, data, status } = await opPost('/api/headcount/submit', payload);
+      if (ok) document.getElementById('hcReason').value = '';
+      opFeedback(ok, data, status);
+      if (ok) loadHeadcount();
+    }
+
+    async function decideHeadcount(id, approved) {
+      const reason = approved ? '' : (prompt('驳回理由（可空）：') || '');
+      const { ok, data, status } = await opPost('/api/headcount/decide',
+                                                { id, approved, reason });
+      opFeedback(ok, data, status);
+      if (ok) { loadHeadcount(); load(); }   // 通过后花名册会多一人
+    }
+
+    async function loadHeadcount() {
+      const resp = await fetch('/api/headcount');
+      if (!resp.ok) {
+        document.querySelector('#headcount tbody').innerHTML = '';
+        return;
+      }
+      const rows = await resp.json();
+      const me = window._me || {};
+      const isAdmin = (me.role || 'admin') === 'admin';
+      const TYPE_LABEL = { new_ai: '新增 AI', clone_ai: '复制 AI', hire_human: '招人类' };
+      document.querySelector('#headcount tbody').innerHTML = rows.length ? rows.map(r => {
+        const pending = r.status === 'pending';
+        const ops = pending && isAdmin
+          ? `<button onclick="decideHeadcount('${esc(r.id)}', true)">通过入职</button> ` +
+            `<button onclick="decideHeadcount('${esc(r.id)}', false)">驳回</button>`
+          : esc(r.status === 'rejected' ? (r.reject_reason || '已驳回') :
+                 r.status === 'approved' ? (r.hired_emp_id || '已入职') : '-');
+        const roleSrc = r.hire_type === 'clone_ai'
+          ? `复制 ${esc(r.source_emp_id)}` : esc(r.role || '-');
+        return `<tr><td>${esc(r.id)}</td><td>${esc(TYPE_LABEL[r.hire_type] || r.hire_type)}</td>` +
+               `<td>${roleSrc}</td><td>${esc(r.headcount)}</td><td>${esc(r.requester)}</td>` +
+               `<td>${esc(r.reason)}</td><td>${esc(r.status)}</td><td>${ops}</td></tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty">暂无编制申请</td></tr>';
+    }
+
+
+    async function loadApprovals() {
+      const resp = await fetch('/api/approvals');
+      if (!resp.ok) return;
+      const rows = await resp.json();
+      window._approvals = rows;   // 今日焦点栏：审批积压计数
+      renderFocus();
+      const me = window._me || {};
+      const isAdmin = (me.role || 'admin') === 'admin';
+      document.querySelector('#approvals tbody').innerHTML = rows.length ? rows.map(a => {
+        const pending = a.status === 'pending';
+        const ops = pending && isAdmin
+          ? `<button onclick="decideApproval('${esc(a.id)}', true)">通过</button> ` +
+            `<button onclick="decideApproval('${esc(a.id)}', false)">驳回</button>`
+          : esc(a.opinion || '-');
+        return `<tr><td>${esc(a.id)}</td><td>${esc(a.type)}</td><td>${esc(a.risk)}</td>` +
+               `<td>${esc(a.requester)}</td><td>${esc(a.summary)}</td>` +
+               `<td>${esc(a.status)}</td><td>${ops}</td></tr>`;
+      }).join('') : '<tr><td colspan="7" class="empty">暂无审批单</td></tr>';
+    }
+
+    async function loadPerf() {
+      const resp = await fetch('/api/perf');
+      if (!resp.ok) return;
+      const perf = await resp.json();
+      const pct = v => (v * 100).toFixed(0) + '%';
+      const pctOrDash = v => v === null || v === undefined ? '—' : (v * 100).toFixed(0) + '%';
+      document.querySelector('#perf tbody').innerHTML = Object.keys(perf).length
+        ? Object.entries(perf).map(([id, s]) =>
+          `<tr><td>${esc(id)}</td><td>${s.completion_count}</td>` +
+          `<td>${s.total_cost.toFixed(2)}</td><td>${s.avg_elapsed.toFixed(1)}s</td>` +
+          `<td>${pct(s.rejection_rate)}</td><td>${pct(s.human_intervention_rate)}</td>` +
+          `<td>${s.avg_score ? s.avg_score.toFixed(1) : '—'}</td>` +
+          `<td>${pctOrDash(s.on_time_rate)}</td></tr>`).join('')
+        : '<tr><td colspan="8" class="empty">暂无绩效数据（验收/审批后记账）</td></tr>';
+    }
+
+    async function loadPayroll() {
+      // 月度绩效报表：发薪/面谈口径（ledger 周期统计），可导 CSV
+      const inp = document.getElementById('payrollMonth');
+      if (!inp.value) inp.value = new Date().toISOString().slice(0, 7);
+      const month = inp.value;
+      const resp = await fetch(`/api/report/payroll?month=${encodeURIComponent(month)}`);
+      if (!resp.ok) {
+        document.querySelector('#payroll tbody').innerHTML =
+          '<tr><td colspan="9" class="empty">暂无数据</td></tr>';
+        return;
+      }
+      const data = await resp.json();
+      const pctOrDash = v => v === null || v === undefined ? '—' : (v * 100).toFixed(0) + '%';
+      document.querySelector('#payroll tbody').innerHTML = data.rows.length
+        ? data.rows.map(r =>
+          `<tr><td>${esc(r.name || r.id)} <span class="hint">${esc(r.id)}</span></td>` +
+          `<td>${r.kind === 'ai' ? 'AI' : '人类'}</td><td>${esc(r.department)}</td>` +
+          `<td>${r.completion_count}</td><td>${Number(r.total_cost).toFixed(2)}</td>` +
+          `<td>${r.avg_score || '—'}</td><td>${pctOrDash(r.on_time_rate)}</td>` +
+          `<td>${r.points}</td><td>${r.rejection_count}</td></tr>`).join('')
+        : `<tr><td colspan="9" class="empty">${esc(month)} 无记录（当月无验收/积分流水）</td></tr>`;
+      document.getElementById('payrollMeta').textContent =
+        `统计周期 ${data.period.start.slice(0, 10)} ~ ${data.period.end.slice(0, 10)}` +
+        '（周期内验收记账口径；历史累计看绩效面板）';
+    }
+
+    function exportPayroll() {
+      const inp = document.getElementById('payrollMonth');
+      if (!inp.value) inp.value = new Date().toISOString().slice(0, 7);
+      window.open(`/api/report/payroll.csv?month=${encodeURIComponent(inp.value)}`);
+    }
+
+    async function loadPoints() {
+      const resp = await fetch('/api/points');
+      if (!resp.ok) return;
+      const board = await resp.json();
+      const fmtPts = v => Number(v).toFixed(1);
+      const money = v => Number(v).toFixed(2);
+      const pctOrDash = v => v === null || v === undefined ? '—' : (v * 100).toFixed(0) + '%';
+      const rows = list => list.map(r =>
+        `<tr><td>${esc(r.name || r.id)}</td><td>${esc(r.department || '')}</td>` +
+        `<td>${fmtPts(r.points)}</td><td>${r.completion_count}</td>` +
+        `<td>${r.rejection_count}</td>` +
+        `<td>${r.avg_score ? r.avg_score.toFixed(1) : '—'}</td>` +
+        `<td>${pctOrDash(r.on_time_rate)}</td>` +
+        `<td>${money(r.total_cost)}</td></tr>`).join('');
+      document.querySelector('#ptsHuman tbody').innerHTML = board.human.length
+        ? rows(board.human)
+        : '<tr><td colspan="8" class="empty">暂无人类员工数据</td></tr>';
+      document.querySelector('#ptsAI tbody').innerHTML = board.ai.length
+        ? rows(board.ai)
+        : '<tr><td colspan="8" class="empty">暂无 AI 员工数据</td></tr>';
+      document.querySelector('#ptsROI tbody').innerHTML = board.roi.length
+        ? board.roi.map(r =>
+          `<tr><td>${esc(r.name || r.id)}</td><td>${r.kind === 'human' ? '人类' : 'AI'}</td>` +
+          `<td>${fmtPts(r.points)}</td><td>${money(r.total_cost)}</td>` +
+          `<td>${fmtPts(r.roi)}</td></tr>`).join('')
+        : '<tr><td colspan="5" class="empty">暂无 ROI 数据（需配置成本单价/薪资）</td></tr>';
+      // 财务报告卡片：可见范围内的总积分 / 总成本 / 整体 ROI
+      if (board.summary) {
+        const s = board.summary;
+        const roiText = s.roi === null ? '—（暂无成本数据）' : fmtPts(s.roi);
+        document.getElementById('ptsSummary').textContent =
+          `财务速览（${s.scope}）：累计积分 ${fmtPts(s.total_points)} · ` +
+          `累计成本 ${money(s.total_cost)} 元 · 每元成本产出 ${roiText} 积分`;
+      }
+      document.getElementById('ptsRules').textContent =
+        `规则：${board.rules.note}（满分验收 +${board.rules.points_per_task}，` +
+        `驳回 -${board.rules.penalty_rejection}，按时 +${board.rules.bonus_on_time}，` +
+        `超时 -${board.rules.penalty_late}）`;
+    }
+
+    async function loadFinance() {
+      const card = document.getElementById('finCard');
+      const resp = await fetch('/api/finance');
+      if (resp.status === 403) {
+        card.className = '';
+        card.innerHTML = '<p class="empty">财务周报仅老板可见</p>';
+        return;
+      }
+      if (!resp.ok) return;
+      const fin = await resp.json();
+      card.className = '';
+      if (!fin.current) {
+        card.innerHTML = '<p class="empty">暂无周报（每周首次自动运转时由 CFO 生成并归档）</p>';
+        return;
+      }
+      const r = fin.current, c = r.company;
+      const fmtPts = v => Number(v).toFixed(1);
+      const money = v => Number(v).toFixed(2);
+      const pctOrDash = v => v === null || v === undefined ? '—' : (v * 100).toFixed(0) + '%';
+      // 环比行：delta>0 ↑ / <0 ↓ / =0 →，有 pct 带百分比
+      const cmpCell = (label, cell) => {
+        if (!cell) return `<span class="msg-meta">${label}：—</span>`;
+        const icon = cell.delta === 0 ? '→' : (cell.delta > 0 ? '↑' : '↓');
+        const pctTxt = cell.pct !== undefined ? `（${cell.pct}%）` : '';
+        return `<span class="msg-meta">${label}：${icon} ${fmtPts(Math.abs(cell.delta))}${pctTxt}</span>`;
+      };
+      const deptRows = (r.departments || []).map(d =>
+        `<tr><td>${esc(d.department)}</td><td>${fmtPts(d.points)}</td>` +
+        `<td>${money(d.cost)}</td><td>${d.roi === null || d.roi === undefined ? '—' : fmtPts(d.roi)}</td>` +
+        `<td>${d.completion_count}</td><td>${d.rejection_count}</td>` +
+        `<td>${esc(d.members.map(m => m.name).join('、'))}</td></tr>`).join('');
+      const history = (fin.history || []).slice().reverse().slice(0, 8).map(h =>
+        `<span class="msg-meta">${h.key}:积分${fmtPts(h.points)}/成本${money(h.cost)}/完成${h.completion_count}</span>`
+      ).join('　');
+      card.innerHTML =
+        `<p style="margin:4px 0"><b>${r.period.key}</b>` +
+        `<span class="msg-meta">（${r.period.start.slice(0, 10)} ~ ${r.period.end.slice(0, 10)} · ` +
+        `由 ${esc(r.generated_by)} 生成）</span></p>` +
+        `<p style="margin:4px 0;font-weight:600">积分 ${fmtPts(c.points)} · 成本 ${money(c.cost)} 元 · ` +
+        `每元成本产出 ${c.roi === null || c.roi === undefined ? '—' : fmtPts(c.roi)} 积分 · ` +
+        `完成 ${c.completion_count} 项（驳回 ${c.rejection_count}，按时 ${c.due ? pctOrDash(c.on_time / c.due) : '—'}）</p>` +
+        (r.compare ? `<p style="margin:4px 0">环比上周（${r.compare.period}）：` +
+          cmpCell('积分', r.compare.points) + '　' +
+          cmpCell('成本', r.compare.cost) + '　' +
+          cmpCell('完成', r.compare.completion_count) + '</p>' : '') +
+        (deptRows ? `<table><thead><tr>
+          <th>部门</th><th>积分</th><th>成本(元)</th><th>ROI</th><th>完成</th><th>驳回</th><th>成员</th>
+        </tr></thead><tbody>${deptRows}</tbody></table>` : '') +
+        `<p style="margin:8px 0 2px"><b>CFO 建议：</b>${esc(r.budget_advice || '—')}</p>` +
+        (history ? `<p style="margin:2px 0">往期：${history}</p>` : '');
+    }
+
+    const SOURCE_LABELS = {assigned: '被动分配', self: '个人计划', unassigned: '未指派'};
+    const SOURCE_BADGE = {assigned: '·被动', self: '·计划', unassigned: '·未派'};
+
+    async function loadPlans() {
+      const who = document.getElementById('plansWho').value.trim();
+      const url = '/api/plans' + (who ? `?who=${encodeURIComponent(who)}` : '');
+      const resp = await fetch(url);
+      if (!resp.ok) return;
+      const plans = await resp.json();
+      const pct = v => (v * 100).toFixed(0) + '%';
+      const o = plans.overall;
+      document.getElementById('plansScope').textContent =
+        `计划汇总（${plans.scope}）：共 ${o.total} 项 · 完成 ${o.done}（完成率 ${o.total ? pct(o.completion_rate) : '—'}）` +
+        ` · 按时 ${o.on_time} · 超时 ${o.late}`;
+      const board = document.getElementById('plansBoard');
+      if (!plans.horizons.length) {
+        board.innerHTML = '<p class="empty">暂无计划任务（提交时选择周期，或等待派单）</p>';
+        return;
+      }
+      board.innerHTML = plans.horizons.map(h => {
+        const rows = h.tasks.map(t =>
+          `<tr><td>${esc(t.id)}</td>` +
+          `<td>${esc(t.title)} <span class="msg-meta">${SOURCE_BADGE[t.source] || ''}${t.assignee ? '·' + esc(t.assignee) : ''}</span></td>` +
+          `<td>${statusBadge(t.state)}</td>` +
+          `<td>${SOURCE_LABELS[t.source] || t.source}</td>` +
+          `<td>${t.due_at ? esc(t.due_at.slice(0, 16).replace('T', ' ')) : '—'}</td>` +
+          `<td>${t.state === 'done' ? (t.on_time === null || t.on_time === undefined ? '—' : (t.on_time ? '按时' : '超时')) : '—'}</td></tr>`).join('');
+        return `<div style="margin:0 0 14px">
+          <p style="margin:2px 0"><b>${esc(h.label)}</b>
+            <span class="msg-meta">共 ${h.total} 项 · 完成 ${h.done}（${pct(h.completion_rate)}）· 按时 ${h.on_time} · 超时 ${h.late}</span></p>
+          <table><thead><tr><th>ID</th><th>标题</th><th>状态</th><th>来源</th><th>截止</th><th>时效</th></tr></thead>
+          <tbody>${rows}</tbody></table>
+        </div>`;
+      }).join('');
+    }
+
+    async function loadReport() {
+      const resp = await fetch('/api/report');
+      if (!resp.ok) return;
+      const rows = await resp.json();
+      const AUTONOMY = { supervised: '全审批', semi: '半自主', full: '高自主' };
+      const ROLES = { staff: '员工', manager: '负责人', admin: '管理员' };
+      document.querySelector('#report tbody').innerHTML = rows.length
+        ? rows.map(d => {
+          const members = d.members.map(m => {
+            const tag = m.kind === 'human'
+              ? `人·${esc(ROLES[m.role] || m.role)}`
+              : `AI·${esc(AUTONOMY[m.autonomy_level] || m.autonomy_level)}`;
+            return `${esc(m.name)}（${tag}）：完成${m.completion_count} · 教训${m.lessons}` +
+              (m.latest_lesson ? ` · 最新：${esc(m.latest_lesson.slice(0, 40))}` : '');
+          }).join('<br>');
+          return `<tr><td>${esc(d.department)}</td><td>${d.completion_count}</td>` +
+                 `<td>${d.rejections}</td><td>${d.lessons}</td><td>${d.auto_reviews}</td>` +
+                 `<td style="max-width:40%">${members || '-'}</td></tr>`;
+        }).join('')
+        : '<tr><td colspan="6" class="empty">暂无复盘数据（验收后沉淀）</td></tr>';
+    }
+
+    async function doLogin() {
+      const id = document.getElementById('loginId').value.trim();
+      const pw = document.getElementById('loginPw').value;
+      if (!id || !pw) { alert('请输入员工 id 与口令'); return; }
+      const resp = await fetch('/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, password: pw }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) { alert(`登录失败：${data.error || resp.status}`); return; }
+      document.getElementById('loginPw').value = '';
+      await loadMe();   // 以 /api/me 为权威（含 role/department），驱动角色徽章与输入框锁定
+      await load();     // 登录前数据接口 401 渲染为空，登录后带会话重拉全量
+    }
+
+    async function doLogout() {
+      await fetch('/api/logout', { method: 'POST' });
+      setMe(null);
+    }
+
+    async function loadChatHistory() {
+      const from = document.getElementById('chatFrom').value.trim();
+      if (!from) { alert('请先填写/登录我的员工 id'); return; }
+      const resp = await fetch(`/api/messages?who=${encodeURIComponent(from)}`);
+      if (!resp.ok) { alert('查询失败'); return; }
+      const { inbox, sent } = await resp.json();
+      const all = [...inbox, ...sent]
+        .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      const log = document.getElementById('chatLog');
+      log.innerHTML = '';
+      if (!all.length) {
+        chatLine('busy', '历史', '（暂无消息）');
+        return;
+      }
+      for (const m of all) {
+        chatLine(m.from === from ? 'me' : 'ai', `${m.from} → ${m.to}`, m.content);
+      }
+      // 查看即已读：本人查自己历史 → 同步清红点
+      if (window._me?.id && from === window._me.id && inbox?.length) {
+        try {
+          await fetch('/api/messages/read', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ who: from }),
+          });
+        } catch (e) { /* 标记失败不影响查看 */ }
+        loadUnread();
+      }
+    }
+
+    async function loadOrg() {
+      const depts = await (await fetch('/api/org')).json();
+      document.getElementById('org').innerHTML = depts.length ? depts.map(d =>
+        `<div class="dept"><h3>${esc(d.id)}（${d.employees.length} 人）</h3>` +
+        '<table><thead><tr><th>ID</th><th>类别</th><th>姓名</th><th>职位</th><th>状态</th><th>在办</th></tr></thead><tbody>' +
+        d.employees.map(e =>
+          `<tr><td>${esc(e.id)}</td><td>${kindBadge(e.kind)}</td><td>${esc(e.name)}</td>` +
+          `<td>${esc(e.title)}</td><td>${statusBadge(e.status)}</td>` +
+          `<td><span class="queue-count">${e.queue.length}</span></td></tr>`).join('') +
+        '</tbody></table></div>').join('')
+        : '<p class="empty">暂无员工</p>';
+    }
+
+    // ---- 员工负荷（派单前看谁闲；后端已按「在职优先 + 在办升序」排好）----
+    async function loadWorkload() {
+      const resp = await fetch('/api/workload');
+      if (!resp.ok) {
+        window._workload = [];
+        document.querySelector('#workload tbody').innerHTML = '';
+        renderAssignHint();
+        return;
+      }
+      const rows = await resp.json();
+      window._workload = rows;
+      document.querySelector('#workload tbody').innerHTML = rows.length
+        ? rows.map(r =>
+          `<tr><td>${esc(r.name)} <span class="hint">${esc(r.id)}</span></td>` +
+          `<td>${r.kind === 'ai' ? 'AI' : '人类'}</td><td>${esc(r.department)}</td>` +
+          `<td>${statusBadge(r.status)}</td>` +
+          `<td><span class="queue-count">${r.queue}</span></td>` +
+          `<td>${r.assigned}</td><td>${r.doing}</td><td>${r.reporting}</td>` +
+          `<td>${r.overdue ? `<span class="wait-badge late">⚠${r.overdue}</span>` : '—'}</td>` +
+          `<td>${r.done_today || '—'}</td></tr>`).join('')
+        : '<tr><td colspan="10" class="empty">暂无员工</td></tr>';
+      const active = rows.filter(r => r.status === 'active');
+      document.getElementById('workloadMeta').textContent =
+        `在职 ${active.length} 人 · 最闲：` +
+        (active.length ? `${active[0].name}（在办 ${active[0].queue}）` : '—') +
+        '（在办 = 工位队列深度，任务从派发到验收一直占位）';
+      renderAssignHint();
+    }
+
+    // 派单推荐：负荷最轻的前三名，点击直接填入派单框（派单从凭记忆变成看数据）
+    function renderAssignHint() {
+      const el = document.getElementById('assignHint');
+      if (!el) return;
+      const active = (window._workload || []).filter(r => r.status === 'active');
+      if (!active.length) { el.innerHTML = ''; return; }
+      el.innerHTML = '推荐：' + active.slice(0, 3).map((r, i) =>
+        `<a href="#" title="在办 ${r.queue} 件，点击填入" onclick="pickAssignee('${esc(r.id)}');return false;">` +
+        `${esc(r.name)}（在办 ${r.queue}${i === 0 ? ' · 最闲' : ''}）</a>`).join(' · ');
+    }
+
+    function pickAssignee(id) {
+      document.getElementById('assignTo').value = id;
+    }
+
+    // 未读红点：导航「对话」新信提示（登录人自己的收件箱口径）
+    async function loadUnread() {
+      const who = window._me?.id;
+      const dot = document.getElementById('msgDot');
+      if (!dot) return;
+      if (!who) { dot.classList.remove('on'); return; }   // 未登录：不亮
+      try {
+        const resp = await fetch(`/api/messages/unread?who=${encodeURIComponent(who)}`);
+        if (!resp.ok) { dot.classList.remove('on'); return; }
+        const { unread } = await resp.json();
+        dot.textContent = unread > 99 ? '99+' : String(unread);
+        dot.classList.toggle('on', unread > 0);
+      } catch (e) { /* 网络抖动：红点保持现状 */ }
+    }
+
+    async function loadMessages() {
+      const who = document.getElementById('msgWho').value.trim();
+      if (!who) { alert('请输入员工 id'); return; }
+      const data = await (await fetch(`/api/messages?who=${encodeURIComponent(who)}`)).json();
+      const row = m => `<tr><td>${esc(m.id)}</td><td>${esc(m.from)} → ${esc(m.to)}` +
+        (m.task_id ? `<div class="msg-meta">任务 ${esc(m.task_id)}</div>` : '') + `</td><td>${esc(m.content)}</td></tr>`;
+      document.querySelector('#msgInbox tbody').innerHTML = data.inbox.length
+        ? data.inbox.map(row).join('') : '<tr><td colspan="3" class="empty">收件箱为空</td></tr>';
+      document.querySelector('#msgSent tbody').innerHTML = data.sent.length
+        ? data.sent.map(row).join('') : '<tr><td colspan="3" class="empty">发件箱为空</td></tr>';
+      // 查看即已读：本人查自己的收件箱 → 清红点（别人代查不动他人未读）
+      if (window._me?.id && who === window._me.id && data.inbox?.length) {
+        try {
+          await fetch('/api/messages/read', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ who }),
+          });
+        } catch (e) { /* 标记失败不影响查看 */ }
+        loadUnread();
+      }
+    }
+
+    async function loadQueue() {
+      const who = document.getElementById('queueWho').value.trim();
+      if (!who) { alert('请输入员工 id'); return; }
+      let data;
+      try {
+        data = await (await fetch(`/api/queue?who=${encodeURIComponent(who)}`)).json();
+      } catch (e) {
+        alert('查询失败：' + e.message); return;
+      }
+      document.querySelector('#queueTasks tbody').innerHTML = data.length
+        ? data.map(q => `<tr><td>${esc(q.id)}</td><td>${esc(q.title)}</td><td>${esc(q.state)}</td></tr>`).join('')
+        : '<tr><td colspan="3" class="empty">队列为空</td></tr>';
+    }
+
+    async function loadHumanTasks() {
+      const who = document.getElementById('who').value.trim();
+      if (!who) { alert('请输入员工 id'); return; }
+      const date = new Date().toISOString().slice(0, 10);
+      const hts = await (await fetch(`/api/human-tasks?who=${encodeURIComponent(who)}&date=${date}`)).json();
+      document.querySelector('#humanTasks tbody').innerHTML = hts.length ? hts.map(h =>
+        `<tr><td>${esc(h.id)}</td><td>${esc(h.title)}</td>` +
+        `<td class="src-${esc(h.source)}">${esc(SRC_LABEL[h.source] || h.source)}</td>` +
+        `<td>${esc(h.due_date || '不限期')}</td><td>${esc(h.status)}</td></tr>`).join('')
+        : '<tr><td colspan="5">当日无待办</td></tr>';
+    }
+
+    async function loadHumanResults() {
+      // 人→人闭环：查看该员工发起的任务已回传的结果
+      const who = document.getElementById('who').value.trim();
+      if (!who) { alert('请输入员工 id'); return; }
+      const rs = await (await fetch(`/api/human-results?who=${encodeURIComponent(who)}`)).json();
+      document.querySelector('#humanResults tbody').innerHTML = rs.length ? rs.map(h =>
+        `<tr><td>${esc(h.id)}</td><td>${esc(h.title)}</td><td>${esc(h.assignee)}</td>` +
+        `<td>${esc(h.result || '（空）')}</td></tr>`).join('')
+        : '<tr><td colspan="4">暂无回传结果</td></tr>';
+    }
+
+    function chatLine(cls, who, text) {
+      const div = document.createElement('div');
+      div.className = 'chat-line ' + cls;
+      div.innerHTML = `<div class="who">${esc(who)}</div><div>${esc(text)}</div>`;
+      document.getElementById('chatLog').appendChild(div);
+      return div;
+    }
+
+    async function sendChat() {
+      const from = document.getElementById('chatFrom').value.trim();
+      const to = document.getElementById('chatTo').value.trim();
+      const box = document.getElementById('chatContent');
+      const content = box.value.trim();
+      if (!from || !to || !content) { alert('请填写 from / to / 消息内容'); return; }
+      chatLine('me', from, content);
+      box.value = '';
+      const btn = document.querySelector('button[onclick="sendChat()"]');
+      btn.disabled = true;
+      const busy = chatLine('busy', to, '思考中…');
+      try {
+        const resp = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from, to, content }),
+        });
+        const data = await resp.json();
+        busy.remove();
+        if (!resp.ok) {
+          chatLine('busy', '错误', data.error || `HTTP ${resp.status}`);
+          return;
+        }
+        if (data.reply == null) {
+          chatLine('ai', to, '（已投递到对方收件箱：收件人是人类员工，请通过其消息渠道查看回复）');
+        } else {
+          chatLine('ai', to, data.reply);
+          // 对话里当场读过的回复 = 已读，防红点误亮
+          if (window._me?.id && from === window._me.id) {
+            try {
+              await fetch('/api/messages/read', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ who: from }),
+              });
+            } catch (e) { /* 失败由下轮刷新兜底 */ }
+            loadUnread();
+          }
+        }
+      } catch (e) {
+        busy.remove();
+        chatLine('busy', '错误', '请求失败：' + e.message);
+      } finally {
+        btn.disabled = false;
+        box.focus();
+      }
+    }
+
+    document.getElementById('chatContent').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChat();
+      }
+    });
+
+    // 报头账历：日期 + 记账时刻（每 30s 对时一次）
+    function tickClock() {
+      const n = new Date();
+      const date = n.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+      const time = n.toTimeString().slice(0, 8);
+      document.getElementById('ledgerClock').innerHTML =
+        `第 ${isoWeek(n)} 周期<br>记账时刻 ${time} · ${date}`;
+    }
+    function isoWeek(d) {
+      const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+      const day = t.getUTCDay() || 7;
+      t.setUTCDate(t.getUTCDate() + 4 - day);
+      const y0 = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+      return Math.ceil(((t - y0) / 86400000 + 1) / 7);
+    }
+    tickClock();
+    setInterval(tickClock, 30000);
+
+    // ---- 看板自动刷新（免 F5）：30s 轮询 + 标签页不可见暂停 ----
+    const AUTO_MS = 30000;
+
+    // 开关偏好跨会话保留（localStorage；旧浏览器/隐私模式静默降级为默认开）
+    window._autoOn = true;
+    try {
+      window._autoOn = localStorage.getItem('laobanAutoRefresh') !== '0';
+    } catch (e) { /* 无 localStorage 则用默认 */ }
+    document.getElementById('autoToggle').checked = window._autoOn;
+
+    function markRefreshed() {
+      const el = document.getElementById('autoMeta');
+      if (!el) return;
+      const t = new Date().toTimeString().slice(0, 8);
+      el.textContent = window._autoOn ? `更新 ${t}` : `已暂停（最后 ${t}）`;
+    }
+
+    function toggleAuto(on) {
+      window._autoOn = on;
+      try {
+        localStorage.setItem('laobanAutoRefresh', on ? '1' : '0');
+      } catch (e) { /* 存不进就算了，本次会话仍生效 */ }
+      markRefreshed();
+      // 开启即刻补刷一次（关闭则只更新状态条，数据停留现状）
+      if (on) autoRefresh(true);
+    }
+
+    async function autoRefresh(force) {
+      if (!window._autoOn && !force) return;   // 关了就不拉
+      if (document.hidden) return;             // 标签页不可见：省请求
+      if (window._loading) return;             // 上一轮还没跑完：跳过本轮
+      await load();                            // 全量重拉（各接口只读幂等）
+      markRefreshed();
+    }
+
+    setInterval(() => autoRefresh(), AUTO_MS);
+    // 回到页面立刻补刷（离开期间轮询被 hidden 跳过，数据可能已旧）
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && window._autoOn) autoRefresh();
+    });
+
+    load().then(markRefreshed);   // 首次加载完成即记录基线时间
+
+    // ---- PWA：注册 Service Worker（应用壳离线可开；注册失败静默降级）----
+    if ('serviceWorker' in navigator) {
+      addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').then(() => renderPushState()).catch((e) =>
+          console.info('SW 注册失败（不影响看板）：', e));
+      });
+    }
+
+    // ---- Web Push：离线通知订阅/退订 ----
+    function urlBase64ToUint8Array(b64) {
+      const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+      const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+      const out = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+      return out;
+    }
+    function bufB64url(buf) {
+      let bin = '';
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+    function pushEmpId() {
+      return window._me?.id || document.getElementById('chatFrom').value.trim();
+    }
+    async function currentPushSub() {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+      const reg = await navigator.serviceWorker.ready;
+      return reg.pushManager.getSubscription();
+    }
+    async function renderPushState() {
+      const btn = document.getElementById('pushBtn');
+      if (!btn) return;
+      if (!('Notification' in window) || !('PushManager' in window)) {
+        btn.disabled = true; btn.textContent = '浏览器不支持通知'; return;
+      }
+      try {
+        const sub = await currentPushSub();
+        btn.textContent = sub ? '关闭离线通知' : '开启离线通知';
+      } catch (e) { /* 无 SW 时静默 */ }
+    }
+    async function togglePush() {
+      const btn = document.getElementById('pushBtn');
+      if (!('Notification' in window) || !('PushManager' in window)) {
+        alert('此浏览器不支持通知'); return;
+      }
+      const sub = await currentPushSub();
+      if (sub) {   // 已订阅 → 退订
+        const emp = pushEmpId();
+        try {
+          await fetch('/api/push/unsubscribe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ employee: emp, endpoint: sub.endpoint }),
+          });
+        } catch (e) { /* 服务端退订失败不阻断本地退订 */ }
+        await sub.unsubscribe();
+        document.getElementById('pushMeta').textContent = '已关闭';
+        renderPushState();
+        return;
+      }
+      // 未订阅 → 订阅
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { alert('未授予通知权限，无法开启离线通知'); return; }
+      const emp = pushEmpId();
+      if (!emp) { alert('请先登录或填写「我的员工 id」'); return; }
+      let publicKey = '';
+      try {
+        const r = await fetch('/api/push/vapid');
+        if (!r.ok) throw new Error('vapid ' + r.status);
+        publicKey = (await r.json()).public_key;
+      } catch (e) { alert('获取推送公钥失败：' + e.message); return; }
+      if (!publicKey) { alert('服务端未就绪 Web Push（缺加密库）'); return; }
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const ns = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+        const body = {
+          employee: emp, endpoint: ns.endpoint,
+          keys: { p256dh: bufB64url(ns.getKey('p256dh')), auth: bufB64url(ns.getKey('auth')) },
+        };
+        const r = await fetch('/api/push/subscribe', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { await ns.unsubscribe(); throw new Error((await r.json()).error || r.status); }
+        document.getElementById('pushMeta').textContent = '已开启';
+      } catch (e) {
+        alert('订阅失败：' + (e.message || e));
+      }
+      renderPushState();
+    }
+  </script>
+</body>
+</html>

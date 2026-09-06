@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "laoban"
+version = "0.1.0"
+description = "Run your company of AI employees"
+requires-python = ">=3.10"
+
+[project.scripts]
+laoban = "laoban.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["laoban*"]
+
+[tool.setuptools.package-data]
+laoban = ["dashboard/dashboard.html"]
