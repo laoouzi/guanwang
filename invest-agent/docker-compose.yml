@@ -1,0 +1,38 @@
+services:
+  invest-agent:
+    build: .
+    image: aegis-invest-agent:1.0.0
+    container_name: invest-agent
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      TZ: Asia/Shanghai
+      PORT: "8787"
+      # 访问令牌：留空则无需登录（公网部署建议设置）
+      ACCESS_TOKEN: "${ACCESS_TOKEN:-}"
+      # 日报时间（Asia/Shanghai）与是否仅工作日
+      REPORT_TIME: "${REPORT_TIME:-08:30}"
+      REPORT_WEEKDAYS_ONLY: "${REPORT_WEEKDAYS_ONLY:-1}"
+      # 飞书 / Lark 群机器人 Webhook（可选，设置后日报自动推送）
+      LARK_WEBHOOK: "${LARK_WEBHOOK:-}"
+      FEISHU_WEBHOOK: "${FEISHU_WEBHOOK:-}"
+      # 大模型（可选，任选一组；不配置则用内置规则引擎）
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      LLM_BASE_URL: "${LLM_BASE_URL:-}"
+      LLM_MODEL: "${LLM_MODEL:-}"
+      ARK_API_KEY: "${ARK_API_KEY:-}"
+      ARK_MODEL: "${ARK_MODEL:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # 服务器需要出网代理时填写，例如 http://127.0.0.1:7890
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      NODE_USE_ENV_PROXY: "1"
+    volumes:
+      - ./data:/app/data
+    networks:
+      - default
+
+networks:
+  default:
+    name: invest-agent-net

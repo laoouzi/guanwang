@@ -1,0 +1,16 @@
+{
+  "holdings": [],
+  "watchlist": [
+    "sh600519",
+    "sz300750",
+    "sh601318",
+    "hk00700",
+    "usAAPL",
+    "usNVDA",
+    "us.INX"
+  ],
+  "settings": {
+    "benchmark": "sh000001",
+    "currency": "CNY"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "aegis-invest-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "24/7 multi-market investment research assistant (research only, not investment advice)",
+  "scripts": {
+    "start": "NODE_USE_ENV_PROXY=1 node src/server.js",
+    "dev": "NODE_USE_ENV_PROXY=1 node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

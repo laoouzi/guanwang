@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>AEGIS · 多市场投研终端</title>
+  <meta name="description" content="24 小时在线的多市场投资研究助手：行情解读、组合诊断、策略回测与盘前简报。" />
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0e13'/%3E%3Cpath d='M16 5 27 27H5Z' fill='none' stroke='%23e6b35c' stroke-width='2'/%3E%3Cpath d='M11 20h10' stroke='%23e6b35c' stroke-width='2'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
+
+  <div class="shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="brand" href="#chat" aria-label="AEGIS 首页">
+        <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+          <path d="M20 4 36 36H4Z" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M12.5 26h15" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M20 12v14" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        <span class="brand-copy">
+          <strong>AEGIS</strong>
+          <small>投研终端</small>
+        </span>
+      </a>
+
+      <nav class="nav">
+        <button class="nav-item is-active" data-view="chat">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5Z"/></svg>
+          <span>对话</span>
+        </button>
+        <button class="nav-item" data-view="market">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m5 14v-7m5 7V8"/></svg>
+          <span>市场</span>
+        </button>
+        <button class="nav-item" data-view="portfolio">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v12H4z"/><path d="M8 7V5h8v2"/><path d="M4 12h16"/></svg>
+          <span>组合</span>
+        </button>
+        <button class="nav-item" data-view="backtest">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-5 4 3 7-8"/><path d="M16 7h4v4"/></svg>
+          <span>回测</span>
+        </button>
+        <button class="nav-item" data-view="report">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M9 11h7M9 15h7M9 7h3"/></svg>
+          <span>日报</span>
+        </button>
+      </nav>
+
+      <div class="rail-foot">
+        <div class="pulse"><i></i><span id="railStatus">数据链路</span></div>
+        <p class="rail-note">研究辅助，不构成投资建议</p>
+      </div>
+    </aside>
+
+    <div class="workarea">
+      <header class="topbar">
+        <div class="ticker-tape" id="tickerTape" aria-label="全球指数"></div>
+        <div class="topbar-right">
+          <span class="clock mono" id="clock">--:--</span>
+          <span class="badge" id="llmBadge" title="模型状态">内置规则引擎</span>
+          <button class="icon-btn" id="refreshBtn" title="刷新数据" aria-label="刷新数据">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="main">
+        <!-- ================= 对话 ================= -->
+        <section class="view is-active" id="view-chat" aria-label="研究对话">
+          <div class="chat-layout">
+            <div class="chat-head">
+              <div>
+                <p class="eyebrow">RESEARCH DESK / 01</p>
+                <h1>研究对话</h1>
+                <p class="lede">覆盖 A 股、港股、美股与全球指数的对话式研究助手。先给数据，再谈观点。</p>
+              </div>
+              <div class="context-chip" id="activeSymbolChip" hidden>
+                <span>当前标的</span>
+                <strong id="activeSymbolText">—</strong>
+                <button id="clearSymbol" aria-label="清除当前标的">×</button>
+              </div>
+            </div>
+
+            <div class="messages" id="chatMessages" aria-live="polite">
+              <div class="empty-state" id="chatEmpty">
+                <p class="eyebrow">AEGIS / 24-7</p>
+                <h2>今天想研究什么？</h2>
+                <p class="empty-sub">可以直接给代码，也可以描述你想验证的判断。所有回答都会附带风险提示。</p>
+                <div class="prompt-grid" id="suggestions">
+                  <button class="prompt-card" data-prompt="分析 600519">
+                    <span class="prompt-tag">个股解读</span>
+                    <strong>分析 600519</strong>
+                    <small>趋势、动能、关键价位</small>
+                  </button>
+                  <button class="prompt-card" data-prompt="今日日报">
+                    <span class="prompt-tag">盘前简报</span>
+                    <strong>今日日报</strong>
+                    <small>全球指数与自选股异动</small>
+                  </button>
+                  <button class="prompt-card" data-prompt="对比 600519 和 NVDA">
+                    <span class="prompt-tag">相对强弱</span>
+                    <strong>对比 600519 和 NVDA</strong>
+                    <small>六个月区间表现</small>
+                  </button>
+                  <button class="prompt-card" data-prompt="回测 AAPL 均线 20/60">
+                    <span class="prompt-tag">策略验证</span>
+                    <strong>回测 AAPL 均线 20/60</strong>
+                    <small>三年历史统计</small>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <form class="composer" id="chatForm">
+              <textarea id="chatInput" rows="1" placeholder="输入代码或问题，例如：分析 00700 / 美股科技股的风险在哪" aria-label="输入问题"></textarea>
+              <div class="composer-foot">
+                <span class="kbd-hint">Enter 发送 · Shift + Enter 换行</span>
+                <button class="send-btn" type="submit" id="chatSend">
+                  <span>发送</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <!-- ================= 市场 ================= -->
+        <section class="view" id="view-market" aria-label="市场行情">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">MARKET / 02</p>
+              <h1>市场行情</h1>
+            </div>
+            <div class="search-wrap">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></svg>
+              <input id="searchInput" type="search" placeholder="搜索代码或名称：600519、腾讯、NVDA" autocomplete="off" />
+              <div class="search-results" id="searchResults" hidden></div>
+            </div>
+          </div>
+
+          <div class="index-strip" id="indexStrip"></div>
+
+          <div class="market-grid">
+            <section class="panel watch-panel">
+              <header class="panel-head">
+                <div>
+                  <h2>自选观察</h2>
+                  <p class="muted small" id="watchCount">—</p>
+                </div>
+                <button class="text-btn" id="openWatchEditor">管理自选</button>
+              </header>
+              <div class="table-wrap">
+                <table class="data-table" id="watchTable">
+                  <thead>
+                    <tr><th>标的</th><th class="num">最新价</th><th class="num">涨跌</th><th class="num">20日</th><th></th></tr>
+                  </thead>
+                  <tbody id="watchBody"></tbody>
+                </table>
+              </div>
+              <form class="inline-form" id="watchForm">
+                <input id="watchSymbol" placeholder="添加自选：代码或名称" autocomplete="off" />
+                <button type="submit" class="ghost-btn">添加</button>
+              </form>
+            </section>
+
+            <section class="panel detail-panel" id="detailPanel">
+              <div class="detail-empty" id="detailEmpty">
+                <p class="eyebrow">DETAIL</p>
+                <h3>选择一个标的</h3>
+                <p class="muted">从左侧自选列表或搜索框选择标的，查看 K 线、指标与信号。</p>
+              </div>
+              <div id="detailContent" hidden>
+                <header class="detail-head">
+                  <div>
+                    <p class="eyebrow" id="detailMarket">—</p>
+                    <h2 id="detailName">—</h2>
+                    <p class="mono muted small" id="detailCode">—</p>
+                  </div>
+                  <div class="detail-price">
+                    <strong class="mono" id="detailPrice">—</strong>
+                    <span class="mono" id="detailPct">—</span>
+                  </div>
+                </header>
+
+                <div class="detail-stats" id="detailStats"></div>
+
+                <div class="chart-toolbar">
+                  <div class="range-tabs" id="rangeTabs">
+                    <button data-range="1m">1M</button>
+                    <button data-range="3m">3M</button>
+                    <button data-range="6m" class="is-active">6M</button>
+                    <button data-range="1y">1Y</button>
+                    <button data-range="3y">3Y</button>
+                  </div>
+                  <div class="chart-legend">
+                    <span><i style="background:var(--amber)"></i>MA20</span>
+                    <span><i style="background:var(--blue)"></i>MA60</span>
+                  </div>
+                </div>
+                <div class="chart" id="chart"></div>
+
+                <div class="indicator-grid" id="indicatorGrid"></div>
+
+                <div class="signal-block">
+                  <div class="block-head">
+                    <h3>信号清单</h3>
+                    <button class="text-btn" id="askAiBtn">让 AI 解读</button>
+                  </div>
+                  <ul class="signal-list" id="signalList"></ul>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <!-- ================= 组合 ================= -->
+        <section class="view" id="view-portfolio" aria-label="持仓组合">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">PORTFOLIO / 03</p>
+              <h1>持仓组合</h1>
+              <p class="lede">录入持仓后，按最新行情折算市值、盈亏、集中度与历史波动。支持 A 股、港股、美股混合持仓。</p>
+            </div>
+            <button class="primary-btn" id="savePortfolio">保存并诊断</button>
+          </div>
+
+          <div class="stat-grid" id="pfStats">
+            <div class="stat-card"><span>总市值</span><strong class="mono" id="pfValue">—</strong><small>按实时汇率折合人民币</small></div>
+            <div class="stat-card"><span>累计盈亏</span><strong class="mono" id="pfPnl">—</strong><small id="pfPnlSub">—</small></div>
+            <div class="stat-card"><span>最大单一占比</span><strong class="mono" id="pfTop">—</strong><small id="pfTopSub">—</small></div>
+            <div class="stat-card"><span>年化波动</span><strong class="mono" id="pfVol">—</strong><small id="pfVolSub">近 80 个交易日估算</small></div>
+          </div>
+
+          <div class="pf-grid">
+            <section class="panel">
+              <header class="panel-head">
+                <h2>持仓明细</h2>
+                <span class="muted small" id="pfCount">—</span>
+              </header>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead><tr><th>标的</th><th class="num">股数</th><th class="num">成本</th><th class="num">现价</th><th class="num">盈亏</th><th class="num hide-sm">权重</th><th></th></tr></thead>
+                  <tbody id="holdingsBody"></tbody>
+                </table>
+              </div>
+              <form class="holding-form" id="holdingForm">
+                <input id="hSymbol" placeholder="代码 / 名称" autocomplete="off" required />
+                <input id="hShares" type="number" min="0" step="any" placeholder="股数" required />
+                <input id="hCost" type="number" min="0" step="any" placeholder="成本价" required />
+                <button type="submit" class="ghost-btn">加入</button>
+              </form>
+              <p class="muted small form-hint">示例：600519 / 00700 / AAPL。A 股按 100 股为 1 手，填写实际股数即可。</p>
+            </section>
+
+            <section class="panel">
+              <header class="panel-head">
+                <h2>结构与风险</h2>
+                <button class="text-btn" id="refreshDiagnosis">重新诊断</button>
+              </header>
+              <div class="allocation" id="pfAllocation">
+                <p class="muted">录入持仓后展示市场暴露与权重分布。</p>
+              </div>
+              <div class="risk-list" id="pfRisk"></div>
+              <div class="markdown narrative" id="pfNarrative"></div>
+              <p class="disclaimer">组合诊断基于公开行情与历史波动估算，不构成投资建议。</p>
+            </section>
+          </div>
+        </section>
+
+        <!-- ================= 回测 ================= -->
+        <section class="view" id="view-backtest" aria-label="策略回测">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">BACKTEST / 04</p>
+              <h1>策略回测</h1>
+              <p class="lede">用历史日线验证简单规则，重点看回撤与稳定性，而不是最漂亮的收益率。</p>
+            </div>
+          </div>
+
+          <div class="bt-grid">
+            <section class="panel bt-form-panel">
+              <form id="btForm" class="bt-form">
+                <label>标的代码
+                  <input id="btSymbol" value="600519" placeholder="600519 / 00700 / AAPL" required />
+                </label>
+                <label>策略
+                  <select id="btStrategy">
+                    <option value="ma_cross">均线交叉</option>
+                    <option value="rsi_reversion">RSI 反转</option>
+                    <option value="breakout">区间突破</option>
+                    <option value="momentum">动量</option>
+                  </select>
+                </label>
+                <div class="bt-params" id="btParams">
+                  <label>快线<input id="btFast" type="number" value="20" min="2" /></label>
+                  <label>慢线<input id="btSlow" type="number" value="60" min="5" /></label>
+                </div>
+                <label>区间
+                  <select id="btRange">
+                    <option value="1y">近 1 年</option>
+                    <option value="3y" selected>近 3 年</option>
+                    <option value="5y">近 5 年</option>
+                  </select>
+                </label>
+                <div class="bt-params">
+                  <label>初始资金<input id="btInitial" type="number" value="100000" min="1000" step="1000" /></label>
+                  <label>单边费率 %<input id="btFee" type="number" value="0.05" min="0" step="0.01" /></label>
+                </div>
+                <button class="primary-btn wide" type="submit">运行回测</button>
+                <p class="muted small">回测不含滑点与分红，结果仅用于研究。默认按收盘价成交。</p>
+              </form>
+            </section>
+
+            <section class="panel bt-result-panel">
+              <div class="bt-placeholder" id="btPlaceholder">
+                <p class="eyebrow">RESULT</p>
+                <h3>等待运行</h3>
+                <p class="muted">选择标的与策略后运行，结果会包含净值曲线、回撤、夏普与逐笔交易。</p>
+              </div>
+              <div id="btResult" hidden>
+                <div class="bt-stats" id="btStats"></div>
+                <div class="chart chart-equity" id="btChart"></div>
+                <div class="trades-wrap">
+                  <h3>最近交易</h3>
+                  <table class="data-table compact">
+                    <thead><tr><th>买入</th><th class="num">买价</th><th>卖出</th><th class="num">卖价</th><th class="num">收益</th></tr></thead>
+                    <tbody id="btTrades"></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <!-- ================= 日报 ================= -->
+        <section class="view" id="view-report" aria-label="市场日报">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">BRIEFING / 05</p>
+              <h1>盘前简报</h1>
+              <p class="lede">每个交易日固定时间生成，可推送到飞书。数据来自公开行情，存在延迟。</p>
+            </div>
+            <div class="head-actions">
+              <button class="ghost-btn" id="reportRefresh">重新生成</button>
+              <button class="primary-btn" id="reportPush">推送到飞书</button>
+            </div>
+          </div>
+
+          <div class="report-grid">
+            <article class="panel report-paper">
+              <header class="report-head">
+                <div>
+                  <p class="eyebrow">DAILY BRIEFING</p>
+                  <h2 id="reportTitle">市场简报</h2>
+                </div>
+                <span class="mono muted" id="reportStamp">—</span>
+              </header>
+              <div class="markdown report-body" id="reportBody">
+                <p class="muted">正在生成简报…</p>
+              </div>
+            </article>
+
+            <aside class="panel sched-panel">
+              <h2>自动推送</h2>
+              <div class="sched-status">
+                <div><span>生成时间</span><strong class="mono" id="schedTime">—</strong></div>
+                <div><span>执行范围</span><strong id="schedDays">—</strong></div>
+                <div><span>最近生成</span><strong class="mono" id="schedLast">—</strong></div>
+                <div><span>模型</span><strong id="schedLlm">—</strong></div>
+              </div>
+              <p class="muted small">通过环境变量配置：<code>REPORT_TIME</code>、<code>LARK_WEBHOOK</code>、<code>LLM_API_KEY</code>。服务需常驻运行，建议配合 Docker restart 策略。</p>
+              <div class="sched-note">
+                <strong>合规提示</strong>
+                <p>本工具输出为公开数据的研究性整理，不构成证券投资咨询或买卖建议，不代客操作。</p>
+              </div>
+            </aside>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>AEGIS 投研终端 · 数据来自公开行情接口</span>
+        <span>仅供研究参考，不构成投资建议</span>
+      </footer>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <div class="modal" id="tokenModal" hidden>
+    <div class="modal-card">
+      <p class="eyebrow">ACCESS</p>
+      <h2>需要访问令牌</h2>
+      <p class="muted">服务端已开启访问控制，请输入部署时设置的 <code>ACCESS_TOKEN</code>。</p>
+      <input id="tokenInput" type="password" placeholder="访问令牌" autocomplete="current-password" />
+      <button class="primary-btn wide" id="tokenSubmit">进入终端</button>
+    </div>
+  </div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
